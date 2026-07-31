@@ -1,0 +1,4 @@
+flask
+beautifulsoup4
+# optional: only needed if ANTHROPIC_API_KEY fallback path is used instead of the `claude` CLI
+anthropic

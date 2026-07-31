@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.env
+.env.confluence
+.wiki_chat_history.db
+.confluence_live_images/
