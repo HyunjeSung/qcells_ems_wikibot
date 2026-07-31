@@ -12,17 +12,37 @@ Rovo Search는 Atlassian 자체 검색 엔진이라 우리가 CQL로 직접 짠 
 항상 같은 credentials.json 파일을 읽고 갱신 결과를 그 자리에 다시 써서 공유한다.
 """
 
+import itertools
 import json
 import re
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+# 예전에 getConfluencePage fetch를 ThreadPoolExecutor로 병렬화했다가 동시 요청 간 응답이
+# 뒤섞이는 사고가 나서 순차 방식으로 되돌렸다(rovo_search 안 주석 참고). 요청 id를 고유값으로
+# 주는 것 자체는 여전히 안전한 습관이라 유지 — 고정값(예: 항상 1)은 절대 쓰지 말 것.
+_next_request_id = itertools.count(1)
 
 CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
 TOKEN_ENDPOINT = "https://cf.mcp.atlassian.com/v1/token"
+
+# Rovo Search(MCP "search" 도구) 자체엔 스페이스로 좁히는 파라미터가 없어서 같은 Atlassian
+# 테넌트(growingenergylabs.atlassian.net)에 있는 Qcells EMS와 무관한 다른 제품 스페이스(NHA,
+# RAT 등) 문서까지 검색 결과에 섞여 들어온다(실측: "TOU가 뭔지 설명해줘" 질문에서 RAT의
+# "Time Of Use(TOU) KR" 같은 무관 문서가 출처로 나옴). Confluence 결과만 URL의 스페이스 키로
+# 걸러낸다 — Jira 이슈는 스페이스 개념이 없으므로 그대로 통과시킨다.
+# GSP1은 이름 그대로 "Global SW PM"(Global Software Product Management) 스페이스로, PRD/FRD
+# 같은 요구사항 문서가 여기서 관리된다(사용자 확인, 2026-07-31) — 처음엔 무관한 다른 제품
+# 스페이스로 오판해서 제외했었는데, 실제로는 정식으로 포함해야 하는 스페이스였음.
+CONFLUENCE_SPACES = ["EnergySW", "ACGEN2", "CWS", "GDRI", "MAG", "HP", "SIACS", "GSP1"]
+
+
+def _confluence_space_of(url):
+    m = re.search(r"/wiki/spaces/([^/]+)/", url or "")
+    return m.group(1) if m else None
 MCP_URL = "https://mcp.atlassian.com/v1/mcp"
 # Atlassian 엣지(WAF)가 python urllib 기본 User-Agent는 403으로 막는다 — 실측 확인됨
 USER_AGENT = "curl/8.5.0"
@@ -95,7 +115,7 @@ def _mcp_call(token, method, params=None, session_id=None, is_notification=False
     if params is not None:
         payload["params"] = params
     if not is_notification:
-        payload["id"] = 1
+        payload["id"] = next(_next_request_id)
 
     headers = {
         "Authorization": f"Bearer {token}",
@@ -144,7 +164,86 @@ def _tool_text_payload(result):
 
 _ARI_CONFLUENCE_PAGE = re.compile(r'ari:cloud:confluence:([^:]+):page/(\d+)$')
 
-MAX_PAGE_CHARS = 4000
+# 4000이었을 때 "Energy SW Part R&R" 같은 긴 인원 표가 중간에 잘려서 뒷쪽 인원이
+# 답변에서 통째로 누락되는 사고가 실측됨(실제 페이지 길이 4941자). 답변 합성을 이제
+# claude -p(큰 컨텍스트 창, 노이즈에 강함)로 전량 전환했으니 로컬 소형 모델 시절 정한
+# 이 좁은 값을 유지할 이유가 없어 여유 있게 올림 — limit=3페이지 기준 최대
+# 3*8000=24000자로, claude -p 컨텍스트 창엔 여전히 작은 양.
+MAX_PAGE_CHARS = 8000
+
+_CUSTOM_TAG_RE = re.compile(r'<custom[^>]*>(.*?)</custom>\s*', re.DOTALL)
+_EMOJI_TAG_TEXT_RE = re.compile(r':\w+:')
+
+
+def _clean_confluence_markup(text):
+    """Confluence storage->markdown 변환 결과에 남는 <custom data-type="mention/emoji/date"
+    ...>내용</custom> 래퍼를 내용만 남기고 벗겨낸다. 이모지 커스텀 태그(:flag_kr: 등)는 답변에
+    의미 없는 노이즈라 통째로 제거한다."""
+    def _repl(m):
+        inner = m.group(1).strip()
+        if _EMOJI_TAG_TEXT_RE.fullmatch(inner):
+            return ''
+        return inner + ' '
+    return _CUSTOM_TAG_RE.sub(_repl, text)
+
+
+_TABLE_SEP_RE = re.compile(r'^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$')
+
+
+def _repair_markdown_tables(text):
+    """Confluence 표에 세로 병합 셀(rowspan)이 있으면 markdown 변환 시 그 칸이 빈칸도 아니고
+    통째로 빠져서, 헤더는 3열인데 병합된 그룹의 멤버 행은 2열만 나오는 식으로 행마다 열 개수가
+    달라진다. 게다가 셀 안에 줄바꿈이 있으면 한 논리적 행이 물리적으로 여러 줄에 걸쳐 나온다
+    (예: "Energy Control \\n& Monitoring |"). 사람도 헷갈리는 표라 claude -p가 같은 질문에도
+    답이 들쭉날쭉했던 것(실측: "Energy SW Part R&R" 인원 수를 물으면 14명/못찾음/18명이 랜덤하게
+    나옴)의 근본 원인으로 파악됨 -> 파싱 전에 정규화한다:
+    1) 표 영역 안에서 '|'로 시작하지 않는 줄은 이전 줄에 이어붙임(셀 내부 개행 복구)
+    2) 헤더보다 열이 부족한 행은 직전 '완전한' 행의 앞쪽 칸으로 채움(병합 셀 forward-fill)
+    """
+    lines = text.split('\n')
+    merged = []
+    in_table = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('|'):
+            merged.append(line)
+            in_table = True
+        elif in_table and stripped and merged:
+            merged[-1] = merged[-1].rstrip() + ' ' + stripped
+        else:
+            in_table = False
+            merged.append(line)
+
+    out = []
+    header_cols = None
+    prev_full_cells = None
+    in_table = False
+    for line in merged:
+        stripped = line.strip()
+        if stripped.startswith('|') and stripped.endswith('|'):
+            cells = [c.strip() for c in stripped[1:-1].split('|')]
+            if _TABLE_SEP_RE.match(stripped):
+                header_cols = (
+                    len(out[-1].strip()[1:-1].split('|'))
+                    if out and out[-1].strip().startswith('|') else len(cells)
+                )
+                in_table = True
+                prev_full_cells = None
+                out.append(line)
+                continue
+            if in_table and header_cols and prev_full_cells and len(cells) < header_cols:
+                missing = header_cols - len(cells)
+                cells = prev_full_cells[:missing] + cells
+                line = '| ' + ' | '.join(cells) + ' |'
+            if in_table and header_cols and len(cells) == header_cols:
+                prev_full_cells = cells
+            out.append(line)
+        else:
+            in_table = False
+            header_cols = None
+            prev_full_cells = None
+            out.append(line)
+    return '\n'.join(out)
 
 
 def _fetch_full_confluence_page(token, session_id, ari_id):
@@ -167,6 +266,7 @@ def _fetch_full_confluence_page(token, session_id, ari_id):
         body = body.get("value") or body.get("markdown")
     if not body or not isinstance(body, str):
         return None
+    body = _repair_markdown_tables(_clean_confluence_markup(body))
     return body[:MAX_PAGE_CHARS]
 
 
@@ -189,29 +289,51 @@ def rovo_search(query, limit=5, fetch_full_pages=True, timeout=20):
     if not isinstance(inner, dict):
         return []
 
-    results = inner.get("results", [])[:limit]
+    # fail-safe 방향으로 판단: Jira 이슈는 스페이스 개념이 없으니 항상 통과, Confluence
+    # 페이지는 URL에서 스페이스 키를 확인할 수 있고 그게 7개 안에 들 때만 통과시킨다.
+    # 오래된 페이지는 `/wiki/pages/viewpage.action?pageId=...` 같은 구형 permalink URL을
+    # 써서 스페이스를 URL만으로 못 가릴 때가 있는데(실측: EnergySW 소속인 "2024 CW42 주간
+    # 업무"도 이 형식으로 나옴), 이런 경우는 정말로 EnergySW여도 그냥 제외한다 — 가끔 유효한
+    # 문서를 놓치는 것보다, 다른 제품 스페이스 문서가 답변에 섞여 들어가는 쪽이 훨씬 위험하다.
+    all_results = inner.get("results", [])
+    filtered = [
+        r for r in all_results
+        if r.get("type") == "issue"
+        or (r.get("type") == "page" and _confluence_space_of(r.get("url")) in CONFLUENCE_SPACES)
+    ]
+    # EnergySW는 실제 임베디드 EMS 구현을 다루는 메인 스페이스, GSP1(Global SW PM) 등 나머지는
+    # 클라우드/웹 콘솔이나 조직 관리 같은 다른 레이어를 다룰 때가 있다(실측: TOU 질문에서 GSP1의
+    # "PRD - Time of Use"가 Rovo 관련도 상위로 나와 EnergySW의 실제 구현 문서를 밀어내고, 답변이
+    # Fleet 웹 콘솔 권한/워크플로우 위주로 나온 사고 발생). 필터 통과한 결과 중 EnergySW 소속
+    # Confluence 페이지를 안정 정렬로 맨 앞에 오도록 재배치해서 limit 안에 우선 들어가게 한다 —
+    # 다른 스페이스가 완전히 배제되는 건 아니고, EnergySW에 관련 문서가 없을 때만 밀려서 들어온다.
+    filtered.sort(key=lambda r: 0 if (
+        r.get("type") == "page" and _confluence_space_of(r.get("url")) == "EnergySW"
+    ) else 1)
+    results = filtered[:limit]
 
-    # getConfluencePage 호출은 서로 독립적인 MCP 요청(같은 session_id를 읽기만 함)이라
-    # 순차로 하나씩 기다릴 이유가 없다 — 병렬로 쏴서 가장 느린 것 하나만 기다리면 된다
-    # (실측: limit=3 기준 순차 ~3.6초 -> 병렬로 단축).
-    def _fetch(r):
+    # getConfluencePage를 ThreadPoolExecutor로 병렬화했다가(순차 ~3.6초 -> 병렬 ~1.5초로
+    # 단축은 됐음) 같은 세션에서 동시에 여러 요청을 보내면 요청/응답이 서로 뒤섞이는 사고가
+    # 실측됨 — JSON-RPC 요청 id를 고유값으로 바꿔도(itertools.count) 완전히 해결되지 않고
+    # "Energy SW Part R&R"이라고 라벨은 맞는데 본문 내용은 "Cloud SW Part R&R" 것이 섞여
+    # 들어오는 등 재발함(원인: 우리 코드 밖, MCP 서버 또는 세션 자체의 동시 요청 처리 문제로
+    # 추정 — 더 파기 전에 일단 안전한 순차 방식으로 되돌림). 인원/조직 데이터처럼 실수가
+    # 그대로 신뢰 문제로 이어지는 내용을 다루므로, 2초 안팎의 속도 이득보다 정확성이 우선.
+    items = []
+    for r in results:
+        text = r.get("text", "")
         if fetch_full_pages and r.get("type") == "page":
             try:
-                return _fetch_full_confluence_page(token, session_id, r.get("id", ""))
+                full_text = _fetch_full_confluence_page(token, session_id, r.get("id", ""))
+                if full_text:
+                    text = full_text
             except Exception as e:
                 import sys
                 print(f"⚠️  getConfluencePage 실패({r.get('title')}): {e}", file=sys.stderr)
-        return None
-
-    with ThreadPoolExecutor(max_workers=max(1, len(results))) as pool:
-        full_texts = list(pool.map(_fetch, results))
-
-    items = []
-    for r, full_text in zip(results, full_texts):
         items.append({
             "title": r.get("title", "(제목 없음)"),
             "url": r.get("url", ""),
-            "text": full_text or r.get("text", ""),
+            "text": text,
             "type": r.get("type", "page"),
         })
     return items

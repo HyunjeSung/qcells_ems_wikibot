@@ -218,6 +218,21 @@
     text-underline-offset: 2px;
   }
   .bubble a:hover { opacity: 0.8; }
+  .bubble h1, .bubble h2, .bubble h3, .bubble h4, .bubble h5, .bubble h6 {
+    font-weight: 700;
+    line-height: 1.35;
+    margin: 20px 0 8px;
+    color: var(--text);
+  }
+  .bubble h1:first-child, .bubble h2:first-child, .bubble h3:first-child,
+  .bubble h4:first-child, .bubble h5:first-child, .bubble h6:first-child {
+    margin-top: 2px;
+  }
+  .bubble h1 { font-size: 1.5em; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+  .bubble h2 { font-size: 1.28em; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+  .bubble h3 { font-size: 1.12em; }
+  .bubble h4 { font-size: 1em; }
+  .bubble h5, .bubble h6 { font-size: 0.92em; color: var(--text-dim); }
   .bubble pre {
     background: var(--code-bg);
     border-radius: 10px;
@@ -566,6 +581,7 @@
 
   const TABLE_ROW_RE = /^\s*\|(.+)\|\s*$/;
   const TABLE_SEP_RE = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+  const HEADING_RE = /^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/;
 
   function parseTableRow(line) {
     let inner = line.trim();
@@ -592,6 +608,16 @@
     while (i < lines.length) {
       const line = lines[i];
       const next = lines[i + 1];
+      const headingMatch = line.match(HEADING_RE);
+      if (headingMatch) {
+        flushParagraph();
+        const level = headingMatch[1].length;
+        const h = document.createElement(`h${level}`);
+        h.innerHTML = renderInline(headingMatch[2]);
+        container.appendChild(h);
+        i++;
+        continue;
+      }
       if (TABLE_ROW_RE.test(line) && next !== undefined && TABLE_SEP_RE.test(next)) {
         flushParagraph();
         const headerCells = parseTableRow(line);

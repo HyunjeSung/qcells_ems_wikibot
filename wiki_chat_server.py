@@ -22,7 +22,7 @@ from pathlib import Path
 from flask import Flask, request, jsonify, send_from_directory
 
 sys.path.insert(0, str(Path(__file__).parent))
-from search_query_utils import _clean_query, _tech_query, _extract_terms, _KO_STOP  # CQL 검색어 정제용 헬퍼
+from wiki_ask import _clean_query, _tech_query, _extract_terms, _KO_STOP  # CQL 검색어 정제용 헬퍼만 재사용 (로컬 위키 검색 자체는 미사용)
 from confluence_to_text import render as render_storage_html
 from bs4 import BeautifulSoup
 from atlassian_mcp_client import rovo_search
@@ -37,20 +37,30 @@ ENV_PATH = BASE_DIR / ".env.confluence"
 # EnergySW로만 좁혀서 검색하면 다른 스페이스(MAG 등)에 있는 실제 관련 문서를
 # 통째로 못 찾는다 — 실측: "Advanced TOU - TimeTable 로직 및 확인사항"은 MAG 스페이스.
 # confluence_export_multi.py가 이미 export해본 스페이스 전체를 검색 대상으로 삼는다.
-CONFLUENCE_SPACES = ["EnergySW", "ACGEN2", "CWS", "GDRI", "MAG", "HP", "SIACS"]
+CONFLUENCE_SPACES = ["EnergySW", "ACGEN2", "CWS", "GDRI", "MAG", "HP", "SIACS", "GSP1"]
 _CQL_SPACE_CLAUSE = "space in (" + ", ".join(f'"{s}"' for s in CONFLUENCE_SPACES) + ")"
 
 app = Flask(__name__)
 
 SYSTEM_PROMPT = """당신은 "Qcells EMS 위키봇"입니다. QCells EMS(Energy Management System) 팀의
-내부 위키(docs/*.md)와 Confluence(EnergySW 스페이스) 문서를 배경지식으로 삼아 답하는
-개발 어시스턴트입니다.
+Confluence 문서를 배경지식으로 삼아 답하는 개발 어시스턴트입니다.
 
 답변 규칙:
 - 아래 제공된 "참고 자료" 안의 내용만 근거로 답하세요. 참고 자료에 없으면 "위키/Confluence에서 해당 내용을 찾지 못했습니다"라고 말하세요
+- 참고 자료 문서 전체를 요약/나열하지 말고, 사용자 질문에 답하는 데 필요한 내용만 골라서 답하세요.
+  특히 참고 자료가 PRD/FRD처럼 문서 전체를 다루는 경우, Role별 권한표(예: "Qcells Admin",
+  "Fleet Partner Admin" 같은 웹 콘솔 접근 권한)나 웹/클라우드 콘솔 메뉴 이동 경로(예: "GNB 검색 →
+  Edit Site → Post-Commissioning") 같은 절은 사용자가 웹 UI 사용법이나 권한 체계를 직접 묻지 않는
+  한 답변에 옮기지 마세요 — 임베디드 EMS 자체의 동작을 묻는 질문에는 무관한 내용입니다
 - 코드·함수명·설정값은 참고 자료의 표현을 그대로 인용하세요
 - 한국어로 답변하되 기술 용어는 원문 그대로 사용하세요
 - 이전 대화 맥락을 참고해서 자연스럽게 이어서 답하세요
+- 참고 자료 안의 표에서 인원/항목을 세거나 전체를 나열해 달라는 질문을 받으면, 표의 마지막 행까지
+  전부 훑은 뒤에 답하세요. 표 중간에 그룹 라벨(예: "Energy Control & Monitoring")이 첫 행에만
+  적혀있고 이후 행은 비어있는 형태(병합된 셀)라도, 그 그룹 라벨은 다음 그룹 라벨이 나오기 전까지
+  이어지는 모든 행에 적용됩니다 — 라벨이 안 보인다고 그 행을 건너뛰거나 이전 행에서 끊긴 것으로
+  오해하지 마세요. 특히 표가 길면 뒤쪽 행을 놓치기 쉬우니, 개수를 답하기 전에 실제로 하나씩 세어서
+  일치하는지 스스로 검증하세요
 - 참고 자료 안에 `![설명](images/파일명)` 형식의 이미지 참조가 있으면, 그 마크다운 이미지 구문을
   그대로 답변에 포함하세요 (경로를 바꾸거나 지어내지 마세요. 참고 자료에 없는 이미지를 있는 것처럼
   언급하는 것은 절대 금지)
@@ -71,7 +81,9 @@ SYSTEM_PROMPT = """당신은 "Qcells EMS 위키봇"입니다. QCells EMS(Energy 
       B -->|적용| D[기본 동작];
       C -->|적용| D;
     ```
-- 답변 마지막에 참고한 출처를 "[[출처명]]" 형식으로 나열하세요"""
+- 답변 마지막에 참고한 출처를 나열할 때, 각 참고 자료 블록 첫 줄에 있는 실제 URL을 그대로 써서
+  마크다운 하이퍼링크 `[출처명](URL)` 형식으로 작성하세요. `[[출처명]]`처럼 URL 없는 이중 대괄호
+  형식은 클릭할 수 없으니 쓰지 마세요. 참고 자료에 없는 URL을 지어내는 것도 절대 금지입니다"""
 
 
 def _load_confluence_env():
@@ -382,7 +394,11 @@ def _expand_search_query(question, history=None, timeout=30):
         if data.get("is_error"):
             return question
         extra = data["result"].strip().splitlines()[0].strip()
-        return f"{question} {extra}" if extra else question
+        # 정제된 키워드가 나왔으면 그것만 검색어로 쓴다(원문에 붙이지 않음) — Rovo Search는
+        # 짧은 키워드 질의에서 훨씬 정확한데(기존에 검증됨), 잡음 섞인 원문 문장을 그대로
+        # 이어붙이면 그 원칙과 반대로 가서 관련도가 흔들린다(실측: "Energy SW"를 물어본
+        # 대화의 후속 질문에 무관한 문장이 잔뜩 섞이자 엉뚱한 파트의 R&R 문서가 나온 사례).
+        return extra if extra else question
     except Exception:
         return question
 
@@ -414,8 +430,8 @@ def build_context(question, history=None):
     for p in live_pages:
         kind = "Jira" if p.get("type") == "issue" else "Confluence"
         label_type = "jira" if p.get("type") == "issue" else "confluence"
-        parts.append(f"[출처: {kind}(live, Rovo Search) - {p['title']}]\n{p['text']}"
-                     if using_rovo else f"[출처: Confluence(live) - {p['title']}]\n{p['text']}")
+        parts.append(f"[출처: {kind}(live, Rovo Search) - {p['title']} | URL: {p['url']}]\n{p['text']}"
+                     if using_rovo else f"[출처: Confluence(live) - {p['title']} | URL: {p['url']}]\n{p['text']}")
         sources.append({"type": label_type, "label": p["title"], "url": p["url"]})
 
     return "\n\n---\n\n".join(parts), sources
