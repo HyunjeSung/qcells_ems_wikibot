@@ -9,14 +9,18 @@ Qcells EMS 위키봇 — 라이브 Confluence 검색을 배경지식으로 쓰�
 """
 
 import os
+import io
 import re
 import sys
+import html
 import json
 import base64
 import shutil
+import zipfile
 import subprocess
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from flask import Flask, request, jsonify, send_from_directory
@@ -25,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from wiki_ask import _clean_query, _tech_query, _extract_terms, _KO_STOP  # CQL 검색어 정제용 헬퍼만 재사용 (로컬 위키 검색 자체는 미사용)
 from confluence_to_text import render as render_storage_html
 from bs4 import BeautifulSoup
-from atlassian_mcp_client import rovo_search
+from atlassian_mcp_client import rovo_search, _EMPTY_BODY_NOTE
 import wiki_chat_history as chat_history
 
 BASE_DIR = Path(__file__).parent
@@ -141,6 +145,264 @@ def _download_attachment(match, headers, base, dest, timeout):
     req = urllib.request.Request(dl_url, headers=dl_headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         dest.write_bytes(resp.read())
+
+
+_DRAWIO_VERSION_RE = re.compile(r'v(\d+)\.(\d+)', re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r'<[^>]+>')
+_PAGE_ID_IN_URL_RE = re.compile(r'pageId=(\d+)')
+
+
+def _clean_drawio_label(raw):
+    text = html.unescape(raw or "")
+    text = _HTML_TAG_RE.sub(' ', text)
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+def _abs_pos(cid, geoms, cache, depth=0):
+    """draw.io 자식 도형의 x/y는 부모(group/container)의 로컬 좌표계 기준 상대값이라,
+    부모 체인을 타고 올라가며 더해야 캔버스 절대 좌표가 나온다. 이걸 안 하면(단순히
+    mxCell을 문서 순서나 raw y로만 정렬하면) 그룹 안에 있는 도형들의 순서가 뒤섞인다
+    (실측: 그룹으로 묶인 Install Data 단계가 앞뒤 라벨과 뒤죽박죽으로 나옴)."""
+    if cid in cache or depth > 30:
+        return cache.get(cid, (0.0, 0.0))
+    if cid not in geoms:
+        cache[cid] = (0.0, 0.0)
+        return cache[cid]
+    x, y, parent = geoms[cid]
+    if parent:
+        px, py = _abs_pos(parent, geoms, cache, depth + 1)
+        result = (x + px, y + py)
+    else:
+        result = (x, y)
+    cache[cid] = result
+    return result
+
+
+def _parse_drawio_sequence(xml_bytes):
+    """draw.io 시퀀스 다이어그램 XML(mxGraphModel)에서 도형/화살표 텍스트 라벨을
+    절대 y좌표(위→아래) 순으로 뽑아 평문 목록으로 재구성한다. draw.io 파일은 압축 없는
+    순수 XML이라(실측 확인: mxfile을 열어보면 바로 <mxGraphModel> 텍스트) 별도
+    디코딩 없이 표준 라이브러리 xml.etree만으로 파싱 가능 — vision/OCR 불필요."""
+    root = ET.fromstring(xml_bytes)
+    # 파일 하나 안에 여러 <diagram> "페이지"가 들어있는 경우가 있다(실측: 이 파일 자체가
+    # v1.06/v1.05 두 페이지를 담고 있어, root 전체를 훑으면 v1.05가 v1.06과 겹쳐서
+    # 거의 모든 라벨이 두 번씩 나옴). 버전 표기가 가장 높은 페이지 하나만 쓴다.
+    diagrams = root.findall("diagram")
+    if diagrams:
+        def diagram_version(d):
+            m = _DRAWIO_VERSION_RE.search(d.get("name", ""))
+            return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+        scope = max(diagrams, key=diagram_version)
+    else:
+        scope = root
+    geoms = {}
+    raw_labels = {}
+    for cell in scope.iter("mxCell"):
+        cid = cell.get("id")
+        if not cid:
+            continue
+        geom = cell.find("mxGeometry")
+        x = float(geom.get("x", 0)) if geom is not None else 0.0
+        y = float(geom.get("y", 0)) if geom is not None else 0.0
+        geoms[cid] = (x, y, cell.get("parent"))
+        value = cell.get("value")
+        if value:
+            raw_labels[cid] = value
+
+    cache = {}
+    cells = []
+    for cid, raw in raw_labels.items():
+        label = _clean_drawio_label(raw)
+        # 도형 라벨에 원본 XML 태그/URL-인코딩 흔적이 섞인 손상된 값은(작성자가 실수로
+        # 다른 다이어그램을 붙여넣은 경우 등, 실측 확인) 건너뛴다 — 지어내는 것보다 낫다.
+        if not label or "mxgraphmodel" in label.lower() or "%3c" in label.lower():
+            continue
+        x, y = _abs_pos(cid, geoms, cache)
+        cells.append((y, x, label))
+    cells.sort(key=lambda c: (c[0], c[1]))
+    return "\n".join(f"- {label}" for _, _, label in cells)
+
+
+_XLSX_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+_XLSX_PKG_REL_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+_XLSX_DOC_REL_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+# 표가 큰 시트(예: Install 719행)를 통째로 넣으면 컨텍스트가 터지므로 시트당/전체
+# 상한을 둔다. Cover/Install처럼 실제 데이터 시트를 우선하고 Pivot_*/Lists 같은
+# 내부용 hidden 시트는 처음부터 건너뛴다.
+_XLSX_MAX_ROWS_PER_SHEET = 300
+_XLSX_MAX_TOTAL_CHARS = 15000
+
+
+def _xlsx_shared_strings(z):
+    try:
+        data = z.read("xl/sharedStrings.xml")
+    except KeyError:
+        return []
+    root = ET.fromstring(data)
+    return ["".join(t.text or "" for t in si.iter(f"{_XLSX_NS}t")) for si in root.findall(f"{_XLSX_NS}si")]
+
+
+def _xlsx_sheet_paths(z):
+    """workbook.xml(숨김 제외 시트 이름+r:id) + workbook.xml.rels(r:id -> 실제 경로)를
+    엮어서 [(시트이름, zip내경로), ...]를 문서 순서대로 반환한다."""
+    wb = ET.fromstring(z.read("xl/workbook.xml"))
+    sheets = [
+        (sh.get("name"), sh.get(f"{_XLSX_DOC_REL_NS}id"))
+        for sh in wb.find(f"{_XLSX_NS}sheets")
+        if sh.get("state") != "hidden"
+    ]
+    rels = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
+    rel_map = {r.get("Id"): r.get("Target") for r in rels.findall(f"{_XLSX_PKG_REL_NS}Relationship")}
+    result = []
+    for name, rid in sheets:
+        target = rel_map.get(rid)
+        if not target:
+            continue
+        result.append((name, target if target.startswith("xl/") else f"xl/{target}"))
+    return result
+
+
+def _xlsx_cell_value(c, shared):
+    t = c.get("t")
+    if t == "inlineStr":
+        is_el = c.find(f"{_XLSX_NS}is")
+        return "".join(tt.text or "" for tt in is_el.iter(f"{_XLSX_NS}t")) if is_el is not None else ""
+    v = c.find(f"{_XLSX_NS}v")
+    if v is None or v.text is None:
+        return ""
+    if t == "s":
+        idx = int(v.text)
+        return shared[idx] if 0 <= idx < len(shared) else ""
+    return v.text
+
+
+def _parse_xlsx_sheet_rows(xml_bytes, shared, max_rows):
+    root = ET.fromstring(xml_bytes)
+    sheet_data = root.find(f"{_XLSX_NS}sheetData")
+    if sheet_data is None:
+        return []
+    lines = []
+    for row in list(sheet_data)[:max_rows]:
+        values = [v for v in (_xlsx_cell_value(c, shared) for c in row) if v not in ("", None)]
+        if values:
+            lines.append(" | ".join(values))
+    return lines
+
+
+_XLSX_SKIP_SHEET_RE = re.compile(r'과거|pivot|^lists$', re.IGNORECASE)
+
+
+def _parse_xlsx_text(xlsx_bytes):
+    """xlsx는 zip 컨테이너 안에 시트별 XML이 들어있는 구조라(실측 확인) openpyxl/pandas
+    없이 표준 라이브러리(zipfile + xml.etree)만으로 파싱 가능 — 이 환경은 pip 자체가
+    깨져있어(pyOpenSSL 버전 충돌) 새 패키지 설치가 안 되므로 의도적으로 무의존성 유지.
+    "Install" 류 이름의 시트를 최우선으로 두고(실측: Cover의 revision history가 먼저
+    나오면 그것만으로 상한을 거의 다 써버려 정작 필요한 데이터 시트가 밀림), 과거
+    스냅샷/피벗용 내부 시트는 건너뛴 뒤, 전체 글자수 상한(_XLSX_MAX_TOTAL_CHARS)에서 멈춘다."""
+    out = []
+    total = 0
+    with zipfile.ZipFile(io.BytesIO(xlsx_bytes)) as z:
+        shared = _xlsx_shared_strings(z)
+        sheets = _xlsx_sheet_paths(z)
+        order = {path: i for i, (_, path) in enumerate(sheets)}
+        sheets.sort(key=lambda s: (0 if "install" in s[0].lower() else 1, order[s[1]]))
+        for name, path in sheets:
+            if _XLSX_SKIP_SHEET_RE.search(name or ""):
+                continue
+            if total >= _XLSX_MAX_TOTAL_CHARS:
+                break
+            try:
+                xml_bytes = z.read(path)
+            except KeyError:
+                continue
+            rows = _parse_xlsx_sheet_rows(xml_bytes, shared, _XLSX_MAX_ROWS_PER_SHEET)
+            if not rows:
+                continue
+            block = f"## Sheet: {name}\n" + "\n".join(rows)
+            budget_left = _XLSX_MAX_TOTAL_CHARS - total
+            if len(block) > budget_left:
+                block = block[:budget_left] + "\n(글자수 상한 도달로 이하 생략)"
+            out.append(block)
+            total += len(block)
+    return "\n\n".join(out) if out else None
+
+
+def _confluence_rest_headers():
+    if not _CONF_ENV:
+        return None, None
+    base = _CONF_ENV["ATLASSIAN_BASE_URL"].rstrip("/")
+    auth = base64.b64encode(
+        f"{_CONF_ENV['ATLASSIAN_EMAIL']}:{_CONF_ENV['ATLASSIAN_API_TOKEN']}".encode()
+    ).decode()
+    return base, {"Authorization": f"Basic {auth}", "Accept": "application/json"}
+
+
+def _download_latest_attachment(page_id, suffix, timeout=15):
+    """페이지에 직접 첨부된 파일 중 suffix(예: ".drawio", ".xlsx")로 끝나는 것 중
+    파일명의 "v1.06"/"V1.69" 같은 버전 표기가 가장 높은 걸 골라 (제목, bytes)로
+    받아온다. 버전 표기가 없으면 순서상 마지막 것을 쓴다. 첨부 자체가 없으면 (None, None)."""
+    base, headers = _confluence_rest_headers()
+    if not headers:
+        return None, None
+    atts = _get_attachments(page_id, headers, base, {}, timeout)
+    matches = [a for a in atts if a.get("title", "").lower().endswith(suffix)]
+    if not matches:
+        return None, None
+
+    def version_key(a):
+        m = _DRAWIO_VERSION_RE.search(a.get("title", ""))
+        return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+
+    matches.sort(key=version_key, reverse=True)
+    target = matches[0]
+    dl_path = target["_links"]["download"]
+    dl_url = f"{base}{dl_path}" if dl_path.startswith("/wiki") else f"{base}/wiki{dl_path}"
+    dl_headers = {k: v for k, v in headers.items() if k.lower() != "accept"}
+    req = urllib.request.Request(dl_url, headers=dl_headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return target.get("title"), resp.read()
+
+
+def _fetch_drawio_text(page_id, timeout=15):
+    """페이지에 직접 첨부된 .drawio 파일 중 가장 높은 버전 하나를 받아 텍스트로
+    파싱한다. Rovo Search가 본문 없는 페이지를 찾아와도(atlassian_mcp_client._EMPTY_BODY_NOTE)
+    다이어그램 자체엔 실제 시퀀스 내용이 있는 경우가 흔해서(실측: "06_EMS+ MCU-MPU
+    Initialization sequence") 이걸로 보완한다. 실패/첨부없음 시 None."""
+    try:
+        title, data = _download_latest_attachment(page_id, ".drawio", timeout)
+        if not data:
+            return None
+        return _parse_drawio_sequence(data)
+    except Exception as e:
+        print(f"⚠️  drawio 다운로드/파싱 실패(page={page_id}): {e}", file=sys.stderr)
+        return None
+
+
+def _fetch_xlsx_text(page_id, timeout=20):
+    """페이지에 직접 첨부된 .xlsx 파일 중 가장 높은 버전 하나를 받아 시트별 텍스트
+    테이블로 파싱한다(실측: "03_Install Document (MPU-MCU)"처럼 본문 없이 Install Group
+    정의를 엑셀로만 관리하는 페이지가 있음). 실패/첨부없음 시 None."""
+    try:
+        title, data = _download_latest_attachment(page_id, ".xlsx", timeout)
+        if not data:
+            return None
+        return _parse_xlsx_text(data)
+    except Exception as e:
+        print(f"⚠️  xlsx 다운로드/파싱 실패(page={page_id}): {e}", file=sys.stderr)
+        return None
+
+
+def _fetch_attachment_text(page_id, timeout=20):
+    """본문이 빈 페이지를 보완할 첨부파일 텍스트를 찾는다 — .drawio, .xlsx 순으로
+    시도해서 처음 찾은 것 하나를 쓴다(한 페이지에 둘 다 있는 경우는 아직 못 봤음,
+    있다면 이후 필요에 따라 둘 다 합치도록 확장)."""
+    text = _fetch_drawio_text(page_id, timeout)
+    if text:
+        return text, "drawio 다이어그램"
+    text = _fetch_xlsx_text(page_id, timeout)
+    if text:
+        return text, "엑셀 첨부파일"
+    return None, None
 
 
 def _fetch_live_images(soup, page_id, headers, base, att_cache, timeout):
@@ -419,6 +681,35 @@ def build_context(question, history=None):
     expanded_question = _expand_search_query(question, history)
     live_pages = rovo_search(_rovo_search_query(expanded_question), limit=3)
     using_rovo = bool(live_pages)
+
+    # 본문이 진짜로 비어있는 페이지(다이어그램/엑셀 첨부파일만 있음)는 원본 첨부파일을
+    # 직접 파싱해서 보완한다(_fetch_attachment_text 참고, 사용자 확정 2026-08-12).
+    for p in live_pages:
+        if p.get("text") == _EMPTY_BODY_NOTE:
+            m = _PAGE_ID_IN_URL_RE.search(p.get("url", ""))
+            if not m:
+                continue
+            extracted_text, source_kind = _fetch_attachment_text(m.group(1))
+            if not extracted_text:
+                continue
+            if source_kind == "drawio 다이어그램":
+                caveat = (
+                    "도형 좌표 기준으로 정렬했으나 alt/loop 같은 중첩 프레임 구조상 완벽한 "
+                    "시간순 재현은 아닐 수 있습니다 — 각 항목은 실제 다이어그램에 있는 내용이 "
+                    "맞지만, 단계 순서는 이 목록의 나열 순서를 그대로 확신하지 말고 register/명령 "
+                    "이름의 논리적 흐름으로 재구성해서 답하세요."
+                )
+            else:
+                caveat = (
+                    "시트/행 순서 그대로 옮긴 것이라 병합 셀이나 서식으로만 표현된 정보(예: "
+                    "그룹 경계선)는 텍스트에 안 드러날 수 있습니다 — 표 구조를 보수적으로 "
+                    "해석하고, 확실치 않은 셀 대응은 추측 없이 원본 확인을 권하세요."
+                )
+            p["text"] = (
+                f"(아래는 {source_kind} 원본(페이지 본문 자체는 비어있음)에서 자동 추출한 "
+                f"내용입니다. {caveat})\n" + extracted_text
+            )
+
     if not using_rovo:
         # 스페이스를 7개로 넓힌 뒤로 동일 키워드 매치 건수가 훨씬 많아져서(예: "TOU" 20+건)
         # limit=3이면 진짜 관련 문서가 순위 밖으로 밀릴 위험이 커짐 -> 여유 있게 5개

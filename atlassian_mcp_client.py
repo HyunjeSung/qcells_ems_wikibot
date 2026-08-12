@@ -14,6 +14,7 @@ Rovo Search는 Atlassian 자체 검색 엔진이라 우리가 CQL로 직접 짠 
 
 import itertools
 import json
+import math
 import re
 import time
 import urllib.error
@@ -38,11 +39,165 @@ TOKEN_ENDPOINT = "https://cf.mcp.atlassian.com/v1/token"
 # 같은 요구사항 문서가 여기서 관리된다(사용자 확인, 2026-07-31) — 처음엔 무관한 다른 제품
 # 스페이스로 오판해서 제외했었는데, 실제로는 정식으로 포함해야 하는 스페이스였음.
 CONFLUENCE_SPACES = ["EnergySW", "ACGEN2", "CWS", "GDRI", "MAG", "HP", "SIACS", "GSP1"]
+SITE_URL = "growingenergylabs.atlassian.net"
+
+# 1차 검색이 놓친(따라갈) 연관 문서를 몇 개까지 더 조회할지. 순차 조회라 늘릴수록
+# 지연이 그대로 늘어난다 — 실측 기반(getConfluencePage 1회 ~0.5~1초)으로 2개면
+# 답변 지연을 크게 늘리지 않으면서 대부분의 "본문 없는 페이지" 케이스를 커버.
+MAX_LINKED_FOLLOW = 2
+# 2-hop으로 찾아낸 페이지의 본문이 진짜로 비어있을 때(다이어그램 첨부파일만 있는 페이지 등)
+# 조용히 버리지 않고 이 문구를 text로 채워서 넘긴다 — 답변 합성 단계가 "그런 페이지가
+# 있다"는 사실 자체는 인지하고 "본문 없음"이라고 정직하게 답할 수 있게(CLAUDE.md 원칙:
+# 본문 없는 페이지는 지어내지 말고 있는 그대로 명시).
+_EMPTY_BODY_NOTE = "(문서화 상태: 본문 없음 — 다이어그램 등 첨부파일만 존재. 원본 페이지에서 직접 확인 필요)"
+_MD_LINK_RE = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
+_PAGE_ID_IN_URL_RE = re.compile(r'/pages/(\d+)')
 
 
 def _confluence_space_of(url):
     m = re.search(r"/wiki/spaces/([^/]+)/", url or "")
     return m.group(1) if m else None
+
+
+def _extract_referenced_page_links(text):
+    """본문 markdown 링크 중 우리 스코프(CONFLUENCE_SPACES) 안의 다른 Confluence 페이지를
+    가리키는 것만 {page_id: link_text} 형태로 뽑는다. Rovo Search는 본문 텍스트 매칭이라
+    본문이 비어있는 페이지(다이어그램 첨부파일만 있는 페이지 등)를 거의 못 찾는데, 그런
+    페이지일수록 다른 문서가 참조 링크로 가리키고 있는 경우가 많다 — 1차 결과 본문에서
+    그 링크를 따라가 보완한다(실측: "06_EMS+ MCU-MPU Initialization sequence"가 top-10
+    검색으로도 안 나왔지만 EMS Project Encyclopedia 페이지 본문의 링크로는 찾아짐)."""
+    found = {}
+    for link_text, url in _MD_LINK_RE.findall(text or ""):
+        if _confluence_space_of(url) not in CONFLUENCE_SPACES:
+            continue
+        m = _PAGE_ID_IN_URL_RE.search(url)
+        if not m:
+            continue
+        found.setdefault(m.group(1), link_text.strip())
+    return found
+
+
+def _fetch_confluence_page_by_id(token, session_id, page_id, max_chars=None):
+    """ARI 파싱 없이 page_id로 직접 getConfluencePage 호출. (title, body) 반환,
+    실패/본문없음 시 body는 None. max_chars 생략 시 MAX_PAGE_CHARS(검색 결과 스니펫
+    기본 상한) 적용 — ToC 매핑 페이지처럼 전체를 다 읽어야 하는 특수 페이지는
+    호출부에서 더 큰 값을 넘긴다(실측 버그: 기본 8000자 상한에 걸려 ToC 후반부
+    섹션(17.1 "CAN Map" 등)이 통째로 안 읽혀서 _toc_entries가 못 찾음)."""
+    result = _call_tool_in_session(token, session_id, "getConfluencePage", {
+        "cloudId": SITE_URL,
+        "pageId": page_id,
+        "contentFormat": "markdown",
+    })
+    payload = _tool_text_payload(result)
+    if not isinstance(payload, dict):
+        return None, None
+    title = payload.get("title")
+    body = payload.get("body")
+    if isinstance(body, dict):
+        body = body.get("value") or body.get("markdown")
+    if not body or not isinstance(body, str):
+        return title, None
+    body = _repair_markdown_tables(_clean_confluence_markup(body))
+    cap = MAX_PAGE_CHARS if max_chars is None else max_chars
+    return title, body[:cap]
+
+
+# 사용자가 직접 만든 "EMS Project Encyclopedia ToC ↔ Confluence 소스" 매핑 페이지(개인
+# 스페이스에 있어 CONFLUENCE_SPACES 필터에는 걸리지만, 저자 본인이 만든 신뢰 가능한
+# 네비게이션 인덱스라 예외적으로 항상 로드해서 보조 검색에 쓴다). 실측: "MCU 초기화
+# 시퀀스" 질의에서 본문이 빈 페이지(다이어그램 첨부파일만 있음)를 텍스트 검색으로
+# top-10까지도 못 찾았는데, 이 ToC의 "[CWS] 06_EMS+ MCU-MPU Initialization sequence"
+# 항목으로는 정확히 찾아짐 — 실제 Atlassian Rovo 챗봇도 이 페이지를 참고해 찾아낸 것으로
+# 확인(사용자 확정, 2026-08-12: 항상 적용).
+_TOC_PAGE_ID = "11427874216"
+_TOC_CACHE_TTL = 6 * 3600
+_toc_cache = {"entries": None, "ts": 0.0}
+_TOC_ENTRY_RE = re.compile(r'^\\?\[([A-Za-z0-9]+)\\?\]\s*(.+)$')
+_TOC_ESCAPE_RE = re.compile(r'\\([_\[\]()*.])')
+
+
+def _toc_entries(token, session_id):
+    now = time.time()
+    if _toc_cache["entries"] is not None and now - _toc_cache["ts"] < _TOC_CACHE_TTL:
+        return _toc_cache["entries"]
+    try:
+        _, body = _fetch_confluence_page_by_id(token, session_id, _TOC_PAGE_ID, max_chars=200000)
+    except Exception:
+        body = None
+    entries = []
+    for line in (body or "").splitlines():
+        m = _TOC_ENTRY_RE.match(line.strip())
+        if not m:
+            continue
+        space, title = m.group(1), _TOC_ESCAPE_RE.sub(r'\1', m.group(2).strip()).strip()
+        if title:
+            entries.append((space, title))
+    _toc_cache["entries"] = entries
+    _toc_cache["ts"] = now
+    return entries
+
+
+_TOC_WORD_RE = re.compile(r'[a-z0-9가-힣]+')
+
+
+def _toc_tokenize(text):
+    return set(_TOC_WORD_RE.findall((text or "").lower()))
+
+
+def _toc_idf(entries):
+    """토큰별 역문서빈도. ToC 자체가 온통 "AC Gen2" 프로젝트 얘기라 "ac"/"gen2"류
+    토큰은 절반 가까운 항목에 다 껴 있어서, 단순 겹침 개수로 스코어링하면 이런 흔한
+    토큰이 "can"/"map"처럼 진짜 구별력 있는 토큰을 눌러버린다(실측: "AC Gen2 CAN
+    map 목록" 질의에서 "CAN Map" 문서가 top-10 밖으로 밀리고 "ac"/"gen2"만 걸리는
+    범용 문서들이 상위를 차지함). 흔한 토큰의 가중치를 낮춰서 이 문제를 없앤다."""
+    n = len(entries)
+    df = {}
+    for _, title in entries:
+        for t in _toc_tokenize(title):
+            df[t] = df.get(t, 0) + 1
+    return {t: math.log((n + 1) / (c + 1)) + 1.0 for t, c in df.items()}
+
+
+def _toc_candidates(token, session_id, query, exclude_titles, limit=2):
+    """ToC 항목 제목과 질의어 사이 IDF 가중 토큰 겹침으로 관련 후보를 뽑는다(임베딩/LLM
+    호출 없음 — 항목 수가 수백 개 수준이라 이 정도로 충분하고 빠르다)."""
+    entries = _toc_entries(token, session_id)
+    if not entries:
+        return []
+    q_tokens = {t for t in _toc_tokenize(query) if len(t) >= 2}
+    if not q_tokens:
+        return []
+    idf = _toc_idf(entries)
+    scored = []
+    seen_titles = set()
+    for space, title in entries:
+        if space not in CONFLUENCE_SPACES or title in exclude_titles or title in seen_titles:
+            continue
+        overlap = q_tokens & _toc_tokenize(title)
+        if not overlap:
+            continue
+        seen_titles.add(title)
+        scored.append((sum(idf.get(t, 1.0) for t in overlap), space, title))
+    scored.sort(key=lambda x: -x[0])
+    return [(space, title) for _, space, title in scored[:limit]]
+
+
+def _resolve_page_id_by_title(token, session_id, space, title):
+    try:
+        result = _call_tool_in_session(token, session_id, "searchConfluenceUsingCql", {
+            "cloudId": SITE_URL,
+            "cql": f'space = "{space}" AND title ~ "{title}"',
+            "limit": 1,
+        })
+        payload = _tool_text_payload(result)
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if results:
+            return results[0].get("content", {}).get("id")
+    except Exception:
+        pass
+    return None
+
+
 MCP_URL = "https://mcp.atlassian.com/v1/mcp"
 # Atlassian 엣지(WAF)가 python urllib 기본 User-Agent는 403으로 막는다 — 실측 확인됨
 USER_AGENT = "curl/8.5.0"
@@ -252,22 +407,9 @@ def _fetch_full_confluence_page(token, session_id, ari_id):
     m = _ARI_CONFLUENCE_PAGE.match(ari_id or "")
     if not m:
         return None
-    cloud_id, page_id = m.group(1), m.group(2)
-    result = _call_tool_in_session(token, session_id, "getConfluencePage", {
-        "cloudId": cloud_id,
-        "pageId": page_id,
-        "contentFormat": "markdown",
-    })
-    payload = _tool_text_payload(result)
-    if not payload:
-        return None
-    body = payload.get("body") if isinstance(payload, dict) else None
-    if isinstance(body, dict):
-        body = body.get("value") or body.get("markdown")
-    if not body or not isinstance(body, str):
-        return None
-    body = _repair_markdown_tables(_clean_confluence_markup(body))
-    return body[:MAX_PAGE_CHARS]
+    _, page_id = m.group(1), m.group(2)
+    _, body = _fetch_confluence_page_by_id(token, session_id, page_id)
+    return body
 
 
 def rovo_search(query, limit=5, fetch_full_pages=True, timeout=20):
@@ -336,6 +478,68 @@ def rovo_search(query, limit=5, fetch_full_pages=True, timeout=20):
             "text": text,
             "type": r.get("type", "page"),
         })
+
+    # 2-hop: 1차 결과가 놓친 문서를 최대 MAX_LINKED_FOLLOW개까지 보완한다(사용자 확정,
+    # 항상 적용). 두 경로를 합쳐서 예산을 공유하되 ToC 매핑 조회(①)를 먼저 채운다 —
+    # 사용자가 직접 만든 큐레이션 인덱스라 관련도가 더 높고(실측: "CAN Map" 질의에서
+    # ToC는 정확히 찾는데 링크 팔로우는 매번 다른 무관한 페이지 2개로 예산을 다 써버려
+    # ToC가 차례를 못 받는 문제가 있었음), 남는 자리를 링크 팔로우(②)가 채운다:
+    #   ① 사용자가 직접 만든 ToC 매핑 페이지에서 질의어와 겹치는 항목을 찾아 제목으로
+    #      역조회한다(_toc_candidates/_resolve_page_id_by_title 함수 docstring 참고).
+    #   ② 1차 결과 본문 안에 실제 markdown 링크로 언급된 다른 페이지를 따라간다.
+    if fetch_full_pages:
+        existing_ids = {
+            m.group(1) for it in items
+            if (m := _PAGE_ID_IN_URL_RE.search(it.get("url", "")))
+        }
+        existing_titles = {it["title"] for it in items}
+        added = 0
+
+        for space, toc_title in _toc_candidates(token, session_id, query, existing_titles, limit=MAX_LINKED_FOLLOW):
+            pid = _resolve_page_id_by_title(token, session_id, space, toc_title)
+            if not pid or pid in existing_ids:
+                continue
+            try:
+                real_title, body = _fetch_confluence_page_by_id(token, session_id, pid)
+            except Exception as e:
+                import sys
+                print(f"⚠️  ToC 연관 문서 조회 실패({toc_title}): {e}", file=sys.stderr)
+                continue
+            if real_title is None:
+                continue
+            items.append({
+                "title": real_title or toc_title,
+                "url": f"/wiki/pages/viewpage.action?pageId={pid}",
+                "text": body or _EMPTY_BODY_NOTE,
+                "type": "page",
+            })
+            existing_ids.add(pid)
+            existing_titles.add(real_title or toc_title)
+            added += 1
+
+        remaining = MAX_LINKED_FOLLOW - added
+        if remaining > 0:
+            referenced = {}
+            for it in items:
+                for pid, link_text in _extract_referenced_page_links(it.get("text", "")).items():
+                    if pid not in existing_ids and pid not in referenced:
+                        referenced[pid] = link_text
+            for pid, link_text in list(referenced.items())[:remaining]:
+                try:
+                    real_title, body = _fetch_confluence_page_by_id(token, session_id, pid)
+                except Exception as e:
+                    import sys
+                    print(f"⚠️  연관 문서 후속 조회 실패({link_text}): {e}", file=sys.stderr)
+                    continue
+                if real_title is None:
+                    continue  # 페이지 자체를 못 가져옴(삭제/권한 등) — 본문만 빈 경우와 구분
+                items.append({
+                    "title": real_title or link_text,
+                    "url": f"/wiki/pages/viewpage.action?pageId={pid}",
+                    "text": body or _EMPTY_BODY_NOTE,
+                    "type": "page",
+                })
+                existing_ids.add(pid)
     return items
 
 
