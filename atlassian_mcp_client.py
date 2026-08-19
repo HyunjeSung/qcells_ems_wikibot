@@ -412,11 +412,15 @@ def _fetch_full_confluence_page(token, session_id, ari_id):
     return body
 
 
-def rovo_search(query, limit=5, fetch_full_pages=True, timeout=20):
+def rovo_search(query, limit=5, fetch_full_pages=True, two_hop=True, timeout=20):
     """Rovo Search(Jira+Confluence 통합 검색)로 query를 검색해
     [{"title":..., "url":..., "text":..., "type": "page"|"issue"}, ...] 형태로 반환.
     fetch_full_pages=True면 Confluence 결과는 스니펫 대신 getConfluencePage로
     페이지 전체 본문을 받아온다(더 정확하지만 결과당 MCP 호출 1회씩 추가됨).
+    two_hop=False면 아래 2-hop 문서 보완(ToC 역조회 + 링크 팔로우)을 건너뛴다 —
+    같은 질문에 원본/확장 두 검색어로 rovo_search를 두 번 부르는 호출부(build_context,
+    2026-08-19 "gem net id" 케이스 수정)에서 매 호출마다 2-hop까지 돌면 요청이
+    5분 타임아웃까지 늘어지는 게 실측되어, 보완 검색 쪽은 이 옵션으로 끈다.
     실패 시(토큰 없음/네트워크 오류 등) 빈 리스트."""
     try:
         token = _get_access_token()
@@ -443,15 +447,19 @@ def rovo_search(query, limit=5, fetch_full_pages=True, timeout=20):
         if r.get("type") == "issue"
         or (r.get("type") == "page" and _confluence_space_of(r.get("url")) in CONFLUENCE_SPACES)
     ]
-    # EnergySW는 실제 임베디드 EMS 구현을 다루는 메인 스페이스, GSP1(Global SW PM) 등 나머지는
-    # 클라우드/웹 콘솔이나 조직 관리 같은 다른 레이어를 다룰 때가 있다(실측: TOU 질문에서 GSP1의
-    # "PRD - Time of Use"가 Rovo 관련도 상위로 나와 EnergySW의 실제 구현 문서를 밀어내고, 답변이
-    # Fleet 웹 콘솔 권한/워크플로우 위주로 나온 사고 발생). 필터 통과한 결과 중 EnergySW 소속
-    # Confluence 페이지를 안정 정렬로 맨 앞에 오도록 재배치해서 limit 안에 우선 들어가게 한다 —
-    # 다른 스페이스가 완전히 배제되는 건 아니고, EnergySW에 관련 문서가 없을 때만 밀려서 들어온다.
-    filtered.sort(key=lambda r: 0 if (
-        r.get("type") == "page" and _confluence_space_of(r.get("url")) == "EnergySW"
-    ) else 1)
+    # GSP1(Global SW PM)은 클라우드/웹 콘솔이나 조직 관리 같은 다른 레이어를 다룰 때가 있다
+    # (실측: TOU 질문에서 GSP1의 "PRD - Time of Use"가 Rovo 관련도 상위로 나와 EnergySW의 실제
+    # 구현 문서를 밀어내고, 답변이 Fleet 웹 콘솔 권한/워크플로우 위주로 나온 사고 발생) — GSP1만
+    # 안정 정렬로 맨 뒤로 미룬다.
+    #
+    # 처음엔 "EnergySW를 맨 앞으로 승격"으로 고쳤었는데, 이건 관련성과 무관하게 EnergySW 소속이면
+    # 무조건 앞세우는 방식이라 부작용이 실측됨: "gem net id ffff" 질의에서 Rovo가 1위로 정확히
+    # 찾아준 HP 스페이스의 "GEM / MI Controller"가, 질의어에 "gem"만 어쩌다 걸린 EnergySW 주간
+    # 업무 보고서 3개에 밀려 limit=5 밖으로 잘려나가는 문제가 재현됨(2026-08-19). GSP1만 최소한으로
+    # 뒤로 미루고 나머지는 Rovo의 원래 관련도 순서를 그대로 신뢰하는 쪽으로 수정.
+    filtered.sort(key=lambda r: 1 if (
+        r.get("type") == "page" and _confluence_space_of(r.get("url")) == "GSP1"
+    ) else 0)
     results = filtered[:limit]
 
     # getConfluencePage를 ThreadPoolExecutor로 병렬화했다가(순차 ~3.6초 -> 병렬 ~1.5초로
@@ -487,7 +495,7 @@ def rovo_search(query, limit=5, fetch_full_pages=True, timeout=20):
     #   ① 사용자가 직접 만든 ToC 매핑 페이지에서 질의어와 겹치는 항목을 찾아 제목으로
     #      역조회한다(_toc_candidates/_resolve_page_id_by_title 함수 docstring 참고).
     #   ② 1차 결과 본문 안에 실제 markdown 링크로 언급된 다른 페이지를 따라간다.
-    if fetch_full_pages:
+    if fetch_full_pages and two_hop:
         existing_ids = {
             m.group(1) for it in items
             if (m := _PAGE_ID_IN_URL_RE.search(it.get("url", "")))

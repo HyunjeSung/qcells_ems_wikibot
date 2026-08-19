@@ -26,7 +26,7 @@ from pathlib import Path
 from flask import Flask, request, jsonify, send_from_directory
 
 sys.path.insert(0, str(Path(__file__).parent))
-from wiki_ask import _clean_query, _tech_query, _extract_terms, _KO_STOP  # CQL 검색어 정제용 헬퍼만 재사용 (로컬 위키 검색 자체는 미사용)
+from search_query_utils import _clean_query, _tech_query, _extract_terms, _KO_STOP  # CQL 검색어 정제용 헬퍼만 재사용 (로컬 위키 검색 자체는 미사용)
 from confluence_to_text import render as render_storage_html
 from bs4 import BeautifulSoup
 from atlassian_mcp_client import rovo_search, _EMPTY_BODY_NOTE
@@ -595,11 +595,23 @@ _GENERIC_KO_WORDS = {
 }
 
 
-def _rovo_search_query(query):
+def _rovo_search_query(query, extra_terms=None):
     """Rovo Search는 짧은 키워드 질의에서 훨씬 정확함(실측: "Advanced TOU 로직"은
     정확 매치, 자연어 문장 그대로는 노이즈↑). 한글 내용어까지 포함해서 뽑되
-    (_extract_terms), 의미 없는 접속/의문 단어는 걸러낸다."""
+    (_extract_terms), 의미 없는 접속/의문 단어는 걸러낸다.
+
+    extra_terms로 원본 질문의 키워드를 함께 넘기면 뒤에 이어붙인다(중복 제거) —
+    _expand_search_query가 도메인을 잘못 짚어 엉뚱한 동의어로 확장했을 때(실측:
+    "gem net id ffff"를 UL1741SB/CSIP/IEEE2030.5 같은 그리드 연계 표준 쪽으로 확장 —
+    net id를 GEM-MI PLC 통신이 아니라 전력망 "네트워크"로 오인), 원본에 있던
+    "gem"/"netid"/"ffff" 같은 축약어가 검색어에서 완전히 사라지는 것을 막기 위함."""
     terms = [t for t in _extract_terms(query) if t not in _GENERIC_KO_WORDS]
+    if extra_terms:
+        seen = {t.lower() for t in terms}
+        for t in extra_terms:
+            if t.lower() not in seen:
+                terms.append(t)
+                seen.add(t.lower())
     return " ".join(terms) if terms else query
 
 
@@ -676,11 +688,37 @@ def build_context(question, history=None):
     # 받아둔 OAuth 토큰 재사용, 무료)가 우리가 직접 짠 CQL 검색보다 훨씬 정확함(실측:
     # "Advanced TOU 로직" 질의에서 원하는 문서 1·2순위 정확 매치 + Jira까지 덤으로).
     # MCP 토큰이 없거나 네트워크 문제로 실패하면 빈 리스트가 오므로 기존 CQL 검색으로
-    # 폴백한다. limit=5는 getConfluencePage 전체 본문 fetch와 합쳐지면 표 하나가
-    # 주간업무 노이즈 여러 개 사이에 묻혀서 작은 모델이 못 찾는 문제가 실측됨 -> 3으로 축소
+    # 폴백한다. limit=5는 한때 getConfluencePage 전체 본문 fetch와 합쳐지면 표 하나가
+    # 주간업무 노이즈 여러 개 사이에 묻혀서 작은 모델이 못 찾는 문제가 실측되어 3으로
+    # 축소했었으나, "gem net id" 케이스(질문 확장이 엉뚱한 방향으로 튀면서 정답 문서가
+    # 3위 밖으로 밀려 아예 안 잡힘)가 실측되어 사용자 확정으로 다시 5로 되돌림
+    # (2026-08-19) — 표-노이즈 리스크가 재발하면 그때 다시 조정.
     expanded_question = _expand_search_query(question, history)
-    live_pages = rovo_search(_rovo_search_query(expanded_question), limit=3)
+    original_terms = [t for t in _extract_terms(question) if t not in _GENERIC_KO_WORDS]
+    original_query = " ".join(original_terms) if original_terms else question
+
+    # 원본 질의를 먼저 검색해 최우선 후보로 삼고, 확장 질의 결과로 보완한다(원본 우선 +
+    # 확장 보완 병합) — "extra_terms로 확장 질의 문자열 뒤에 원본 키워드를 붙이는" 이전
+    # 방식은 부족했다. 실측: "gem net id ffff" 질문에서 claude -p 확장이 "GEM"을 매번
+    # 다른 업계 표준(SECS/GEM 반도체 설비 통신, GPON GEM 광통신 포트 등 우리 도메인과
+    # 무관한 것)으로 오인해 그쪽 용어를 검색어에 잔뜩 섞어 넣었고, 원본 키워드를 뒤에
+    # 이어붙이는 것만으로는 그 노이즈를 못 이겨서 4번 중 1번꼴로 정답 문서가 아예
+    # 후보에서 빠지는 게 재현됨. 반면 원본 질의("gem net id ffff") 단독 검색은 4번
+    # 전부 정답 문서를 Rovo 1위로 정확히 찾음 — 그래서 원본 질의를 신뢰의 기준으로 삼고,
+    # 확장 질의는 "동작원리→architecture"류(실측 검증된 이득)의 동의어 보완 용도로만
+    # 추가한다(2026-08-19, "gem net id" 케이스로 재현/수정).
+    live_pages = rovo_search(original_query, limit=3)
     using_rovo = bool(live_pages)
+
+    if using_rovo and expanded_question.strip() != original_query.strip():
+        expanded_pages = rovo_search(
+            _rovo_search_query(expanded_question, extra_terms=original_terms), limit=3, two_hop=False
+        )
+        seen_urls = {p["url"] for p in live_pages}
+        for p in expanded_pages:
+            if p["url"] not in seen_urls:
+                live_pages.append(p)
+                seen_urls.add(p["url"])
 
     # 본문이 진짜로 비어있는 페이지(다이어그램/엑셀 첨부파일만 있음)는 원본 첨부파일을
     # 직접 파싱해서 보완한다(_fetch_attachment_text 참고, 사용자 확정 2026-08-12).
