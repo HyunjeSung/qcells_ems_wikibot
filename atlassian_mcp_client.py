@@ -38,7 +38,14 @@ TOKEN_ENDPOINT = "https://cf.mcp.atlassian.com/v1/token"
 # GSP1은 이름 그대로 "Global SW PM"(Global Software Product Management) 스페이스로, PRD/FRD
 # 같은 요구사항 문서가 여기서 관리된다(사용자 확인, 2026-07-31) — 처음엔 무관한 다른 제품
 # 스페이스로 오판해서 제외했었는데, 실제로는 정식으로 포함해야 하는 스페이스였음.
-CONFLUENCE_SPACES = ["EnergySW", "ACGEN2", "CWS", "GDRI", "MAG", "HP", "SIACS", "GSP1"]
+# ~712020fbdcf344af074f33bf0d76cfe893cd15(AhyoungKim 개인 스페이스)는 처음엔 개별 페이지
+# 4개만 화이트리스트로 뚫었었는데(인턴 과제/드래프트 등 무관 문서가 44개 중 섞여 있어서),
+# 사용자가 이 스페이스 전체를 학습 대상에 넣기로 확정(2026-08-21) — 노이즈 위험을 감수하고
+# 스페이스 단위로 통째 포함.
+CONFLUENCE_SPACES = [
+    "EnergySW", "ACGEN2", "CWS", "GDRI", "MAG", "HP", "SIACS", "GSP1",
+    "~712020fbdcf344af074f33bf0d76cfe893cd15",
+]
 SITE_URL = "growingenergylabs.atlassian.net"
 
 # 1차 검색이 놓친(따라갈) 연관 문서를 몇 개까지 더 조회할지. 순차 조회라 늘릴수록
