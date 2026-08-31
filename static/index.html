@@ -1,4 +1,13 @@
 <title>Qcells EMS 위키봇</title>
+<script>
+  // CSS보다 먼저 실행해 테마 전환 시 잘못된 색으로 잠깐 렌더링되는 flash를 막는다.
+  (function () {
+    var saved = localStorage.getItem('theme');
+    if (saved === 'light' || saved === 'dark') {
+      document.documentElement.setAttribute('data-theme', saved);
+    }
+  })();
+</script>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 <style>
   :root {
@@ -14,7 +23,7 @@
     --code-bg: rgba(61, 57, 41, 0.06);
   }
   @media (prefers-color-scheme: dark) {
-    :root {
+    :root:not([data-theme="light"]) {
       --bg: #262624;
       --bg-raised: #2D2C2A;
       --text: #F2F0E9;
@@ -26,6 +35,18 @@
       --input-bg: #33322F;
       --code-bg: rgba(255, 255, 255, 0.08);
     }
+  }
+  :root[data-theme="dark"] {
+    --bg: #262624;
+    --bg-raised: #2D2C2A;
+    --text: #F2F0E9;
+    --text-dim: #9C998F;
+    --accent: #D97757;
+    --accent-text: #262624;
+    --border: #3D3B37;
+    --user-bubble: #33322F;
+    --input-bg: #33322F;
+    --code-bg: rgba(255, 255, 255, 0.08);
   }
 
   * { box-sizing: border-box; }
@@ -156,6 +177,18 @@
     flex: none;
   }
   header .name { color: var(--text); font-weight: 600; }
+  #themeToggleBtn {
+    margin-left: auto;
+    width: 32px; height: 32px;
+    display: flex; align-items: center; justify-content: center;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-raised);
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  #themeToggleBtn:hover { border-color: var(--accent); color: var(--text); }
+  #themeToggleBtn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 
   /* 대화 시작 전: 화면 중앙에 타이틀 + 입력창 */
   #app.landing #messages { display: none; }
@@ -320,19 +353,20 @@
   }
   .source-item a:hover { color: var(--accent); text-decoration: underline; }
   .source-item span.plain { color: var(--text); }
-  .typing { color: var(--text-dim); }
-  .typing::after {
-    content: '';
+  .typing { color: var(--text-dim); display: inline-flex; align-items: center; gap: 6px; }
+  .typing .dots { display: inline-flex; gap: 3px; }
+  .typing .dots span {
     display: inline-block;
     width: 6px; height: 6px;
-    margin-left: 6px;
     border-radius: 50%;
     background: var(--accent);
-    animation: pulse 1.1s ease-in-out infinite;
+    animation: typing-bounce 4.8s ease-in-out infinite;
   }
-  @keyframes pulse {
-    0%, 100% { opacity: 0.25; }
-    50% { opacity: 1; }
+  .typing .dots span:nth-child(2) { animation-delay: 0.6s; }
+  .typing .dots span:nth-child(3) { animation-delay: 1.2s; }
+  @keyframes typing-bounce {
+    0%, 60%, 100% { opacity: 0.3; }
+    30% { opacity: 1; }
   }
 
   #inputbar {
@@ -416,6 +450,7 @@
     <header>
       <button id="sidebarOpenBtn" type="button" title="사이드바 펼치기">▸</button>
       <span class="name">Qcells EMS 위키봇</span>
+      <button id="themeToggleBtn" type="button" title="테마 전환"></button>
     </header>
     <div id="stage">
       <div class="landing-title">Qcells EMS 위키봇</div>
@@ -447,14 +482,36 @@
   const sidebarEl = document.getElementById('sidebar');
   const sidebarCollapseBtn = document.getElementById('sidebarCollapseBtn');
   const sidebarOpenBtn = document.getElementById('sidebarOpenBtn');
+  const themeToggleBtn = document.getElementById('themeToggleBtn');
 
   let history = [];
   let started = false;
   let currentConversationId = null;
 
+  // data-theme이 명시돼 있으면(수동 토글) 그걸 우선하고, 없으면 시스템 설정을 따른다.
+  function getEffectiveTheme() {
+    const manual = document.documentElement.getAttribute('data-theme');
+    if (manual === 'light' || manual === 'dark') return manual;
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+  const ICON_SUN = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>';
+  const ICON_MOON = '<svg viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/></svg>';
+  function applyThemeIcon() {
+    themeToggleBtn.innerHTML = getEffectiveTheme() === 'dark' ? ICON_MOON : ICON_SUN;
+  }
+  applyThemeIcon();
+  themeToggleBtn.addEventListener('click', () => {
+    const next = getEffectiveTheme() === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem('theme', next);
+    applyThemeIcon();
+    if (window.mermaid) {
+      mermaid.initialize({ startOnLoad: false, theme: next === 'dark' ? 'dark' : 'default' });
+    }
+  });
+
   if (window.mermaid) {
-    const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-    mermaid.initialize({ startOnLoad: false, theme: isDark ? 'dark' : 'default' });
+    mermaid.initialize({ startOnLoad: false, theme: getEffectiveTheme() === 'dark' ? 'dark' : 'default' });
   }
 
   let availableModels = [];
@@ -872,7 +929,18 @@
     history.push({ role: 'user', content: text });
 
     const bubble = addMessage('assistant', '');
-    bubble.innerHTML = '<span class="typing">위키 검색 중</span>';
+    const statusMessages = ['위키 검색 중', '관련 문서 분석 중', 'AI 답변 생성 중', '거의 다 됐어요, 조금만 더 기다려주세요'];
+    let statusIdx = 0;
+    bubble.innerHTML = '<span class="typing"><span class="typing-label">' + statusMessages[0]
+      + '</span><span class="dots"><span></span><span></span><span></span></span></span>';
+    const typingLabel = bubble.querySelector('.typing-label');
+    // claude -p CLI는 최대 180초까지 걸릴 수 있어(백엔드 subprocess timeout), 같은 문구가
+    // 오래 떠 있으면 멈춘 것처럼 보인다 — 점 애니메이션과 별개로 문구도 주기적으로 바꿔준다.
+    const statusTimer = setInterval(() => {
+      if (!typingLabel.isConnected) { clearInterval(statusTimer); return; }
+      statusIdx = (statusIdx + 1) % statusMessages.length;
+      typingLabel.textContent = statusMessages[statusIdx];
+    }, 12000);
 
     async function askChat(model, retry) {
       const res = await fetch('/api/chat', {
@@ -914,6 +982,7 @@
     } catch (err) {
       bubble.textContent = '서버 연결 오류: ' + err.message;
     } finally {
+      clearInterval(statusTimer);
       sendBtn.disabled = false;
       messagesEl.scrollTop = messagesEl.scrollHeight;
     }
