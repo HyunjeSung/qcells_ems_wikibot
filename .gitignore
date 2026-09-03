@@ -4,3 +4,4 @@ __pycache__/
 .env.confluence
 .wiki_chat_history.db
 .confluence_live_images/
+*:Zone.Identifier
