@@ -22,6 +22,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from datetime import datetime
 
 from flask import Flask, request, jsonify, send_from_directory
 
@@ -1001,6 +1002,99 @@ def conversation_detail(conversation_id):
 @app.route("/api/conversations/<conversation_id>", methods=["DELETE"])
 def conversation_delete(conversation_id):
     chat_history.delete_conversation(conversation_id)
+    return jsonify({"ok": True})
+
+
+FEEDBACK_TO_ADDRESS = "hyunje.sung@qcells.com"
+
+
+def _ps_single_quote(value):
+    """PowerShell 단일따옴표 문자열 리터럴로 안전하게 이스케이프(내부에 '' 로 이스케이프)."""
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def send_feedback_email(subject, body_text):
+    """Outlook 데스크톱 앱(COM)을 Windows 쪽에서 자동화해 메일을 보낸다.
+    WSL2에는 SMTP/Outlook 클라이언트가 없어 powershell.exe interop으로 Windows 쪽 Outlook을 조작한다.
+    별도 SMTP 자격증명/앱 등록이 필요없다(로그인된 Outlook 세션을 그대로 재사용).
+    이 Outlook 프로필의 기본 메일 형식이 HTML이라 .Body(평문)에 대입하면 조용히 무시되고 빈 본문으로
+    전송됨(실측 확인) — .HTMLBody를 써야 실제로 반영된다."""
+    html_body = (
+        '<html><body><pre style="font-family:Consolas,\'Malgun Gothic\',monospace;'
+        'font-size:13px;white-space:pre-wrap;">' + html.escape(body_text) + "</pre></body></html>"
+    )
+    ps_script = (
+        "$ol = New-Object -ComObject Outlook.Application\n"
+        "$mail = $ol.CreateItem(0)\n"
+        f"$mail.To = {_ps_single_quote(FEEDBACK_TO_ADDRESS)}\n"
+        f"$mail.Subject = {_ps_single_quote(subject)}\n"
+        f"$mail.HTMLBody = {_ps_single_quote(html_body)}\n"
+        "$mail.Send()\n"
+        "Write-Output 'SENT'\n"
+    )
+    encoded = base64.b64encode(ps_script.encode("utf-16-le")).decode("ascii")
+
+    def _decode(raw):
+        # Windows 콘솔 리다이렉션 출력은 로케일에 따라 cp949(한글 Windows)로 나올 수 있어 utf-8을 먼저
+        # 시도하고 실패하면 cp949로 재시도한다.
+        for enc in ("utf-8", "cp949"):
+            try:
+                return raw.decode(enc)
+            except UnicodeDecodeError:
+                continue
+        return raw.decode("utf-8", errors="replace")
+
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+            capture_output=True, timeout=30,
+        )
+    except Exception as e:
+        return False, str(e)
+    stdout = _decode(result.stdout)
+    stderr = _decode(result.stderr)
+    if result.returncode == 0 and "SENT" in stdout:
+        return True, ""
+    return False, (stderr or stdout or "알 수 없는 오류").strip()
+
+
+@app.route("/api/feedback", methods=["POST"])
+def feedback():
+    body = request.get_json(force=True) or {}
+    message = (body.get("message") or "").strip()
+    if not message:
+        return jsonify({"error": "메시지를 입력해주세요."}), 400
+    transcript = body.get("transcript") or []
+    conversation_id = (body.get("conversation_id") or "").strip()
+
+    submitted_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # 리버스 프록시 없이 Flask에 직접 붙는 구성이라 X-Forwarded-For는 클라이언트가 위조 가능 —
+    # 신뢰할 수 있는 remote_addr만 사용한다.
+    client_ip = request.remote_addr or "알 수 없음"
+    user_agent = request.headers.get("User-Agent", "알 수 없음")
+
+    parts = [
+        f"[제보 내용]\n{message}",
+        f"[제보 정보]\n시각: {submitted_at}\nIP: {client_ip}\nUser-Agent: {user_agent}",
+    ]
+    turn_lines = []
+    for turn in transcript:
+        role = turn.get("role")
+        content = (turn.get("content") or "").strip()
+        if not content:
+            continue
+        label = "질문" if role == "user" else "답변"
+        turn_lines.append(f"[{label}]\n{content}")
+    if turn_lines:
+        parts.append("[대화 내용 전체]\n" + "\n\n".join(turn_lines))
+    if conversation_id:
+        parts.append(f"[대화 ID]\n{conversation_id}")
+    body_text = "\n\n".join(parts)
+    subject = "[위키봇 수정요청] " + (message[:60] + ("…" if len(message) > 60 else ""))
+
+    ok, err = send_feedback_email(subject, body_text)
+    if not ok:
+        return jsonify({"error": f"메일 전송 실패: {err}"}), 500
     return jsonify({"ok": True})
 
 

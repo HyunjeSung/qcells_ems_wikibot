@@ -314,7 +314,7 @@
     margin: 8px 0 4px;
   }
   .sources-block {
-    margin-top: 12px;
+    margin-top: 0;
   }
   .sources-toggle {
     display: inline-flex;
@@ -353,6 +353,79 @@
   }
   .source-item a:hover { color: var(--accent); text-decoration: underline; }
   .source-item span.plain { color: var(--text); }
+  .msg-actions {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin-top: 12px;
+  }
+  .feedback-btn {
+    flex: none;
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: 14px;
+    padding: 4px 12px;
+    font-size: 12.5px;
+    cursor: pointer;
+    font-family: inherit;
+    white-space: nowrap;
+  }
+  .feedback-btn:hover { color: var(--text); border-color: var(--text-dim); }
+
+  .feedback-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.4);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 100;
+  }
+  .feedback-overlay.hidden { display: none; }
+  .feedback-modal {
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 20px;
+    width: 90%;
+    max-width: 480px;
+    max-height: 80vh;
+    overflow-y: auto;
+  }
+  .feedback-modal h3 { margin: 0 0 14px; font-size: 16px; }
+  #feedbackMessage {
+    width: 100%;
+    resize: vertical;
+    background: var(--input-bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 12px;
+    color: var(--text);
+    font-size: 14px;
+    font-family: inherit;
+  }
+  .feedback-status { font-size: 12.5px; margin-top: 8px; min-height: 16px; }
+  .feedback-status.error { color: var(--accent); }
+  .feedback-status.ok { color: var(--text-dim); }
+  .feedback-actions {
+    display: flex; justify-content: flex-end; gap: 8px;
+    margin-top: 14px;
+  }
+  .feedback-actions button {
+    border-radius: 10px;
+    padding: 8px 14px;
+    font-size: 13.5px;
+    cursor: pointer;
+    font-family: inherit;
+    border: 1px solid var(--border);
+    background: none;
+    color: var(--text);
+  }
+  .feedback-actions button:disabled { opacity: 0.5; cursor: default; }
+  #feedbackSendBtn {
+    background: var(--accent);
+    color: var(--accent-text);
+    border-color: var(--accent);
+  }
+
   .typing { color: var(--text-dim); display: inline-flex; align-items: center; gap: 6px; }
   .typing .dots { display: inline-flex; gap: 3px; }
   .typing .dots span {
@@ -466,6 +539,18 @@
         </div>
         <div id="hint">Confluence 라이브 검색 기반으로 답합니다</div>
       </div>
+    </div>
+  </div>
+</div>
+
+<div id="feedbackOverlay" class="feedback-overlay hidden">
+  <div class="feedback-modal">
+    <h3>수정요청 보내기</h3>
+    <textarea id="feedbackMessage" rows="4" placeholder="예: Jira 티켓 연동이 안 됩니다. / 이 부분 답변이 사실과 다릅니다..."></textarea>
+    <div id="feedbackStatus" class="feedback-status"></div>
+    <div class="feedback-actions">
+      <button type="button" id="feedbackCancelBtn">취소</button>
+      <button type="button" id="feedbackSendBtn">이메일로 보내기</button>
     </div>
   </div>
 </div>
@@ -763,8 +848,8 @@
     return '📄';
   }
 
-  function appendSources(bubble, sources) {
-    if (!sources || !sources.length) return;
+  function buildSourcesBlock(sources) {
+    if (!sources || !sources.length) return null;
     const block = document.createElement('div');
     block.className = 'sources-block';
 
@@ -800,7 +885,24 @@
 
     block.appendChild(toggle);
     block.appendChild(list);
-    bubble.appendChild(block);
+    return block;
+  }
+
+  function appendMessageActions(bubble, sources, transcript) {
+    const row = document.createElement('div');
+    row.className = 'msg-actions';
+
+    const sourcesBlock = buildSourcesBlock(sources);
+    if (sourcesBlock) row.appendChild(sourcesBlock);
+
+    const feedbackBtn = document.createElement('button');
+    feedbackBtn.type = 'button';
+    feedbackBtn.className = 'feedback-btn';
+    feedbackBtn.textContent = '수정요청';
+    feedbackBtn.addEventListener('click', () => openFeedbackModal(transcript));
+    row.appendChild(feedbackBtn);
+
+    bubble.appendChild(row);
   }
 
   function addMessage(role, text) {
@@ -816,6 +918,66 @@
     messagesEl.scrollTop = messagesEl.scrollHeight;
     return bubble;
   }
+
+  // ── 수정요청(피드백) 이메일 ──
+
+  const feedbackOverlay = document.getElementById('feedbackOverlay');
+  const feedbackMessageEl = document.getElementById('feedbackMessage');
+  const feedbackStatusEl = document.getElementById('feedbackStatus');
+  const feedbackCancelBtn = document.getElementById('feedbackCancelBtn');
+  const feedbackSendBtn = document.getElementById('feedbackSendBtn');
+  let feedbackContext = { transcript: [] };
+
+  function openFeedbackModal(transcript) {
+    feedbackContext = { transcript: transcript || [] };
+    feedbackMessageEl.value = '';
+    feedbackStatusEl.textContent = '';
+    feedbackStatusEl.className = 'feedback-status';
+    feedbackSendBtn.disabled = false;
+    feedbackOverlay.classList.remove('hidden');
+    feedbackMessageEl.focus();
+  }
+
+  function closeFeedbackModal() {
+    feedbackOverlay.classList.add('hidden');
+  }
+
+  feedbackCancelBtn.addEventListener('click', closeFeedbackModal);
+  feedbackOverlay.addEventListener('click', (e) => {
+    if (e.target === feedbackOverlay) closeFeedbackModal();
+  });
+
+  feedbackSendBtn.addEventListener('click', async () => {
+    const message = feedbackMessageEl.value.trim();
+    if (!message) {
+      feedbackStatusEl.textContent = '보낼 내용을 입력해주세요.';
+      feedbackStatusEl.className = 'feedback-status error';
+      return;
+    }
+    feedbackSendBtn.disabled = true;
+    feedbackStatusEl.textContent = '전송 중...';
+    feedbackStatusEl.className = 'feedback-status';
+    try {
+      const res = await fetch('/api/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message,
+          transcript: feedbackContext.transcript,
+          conversation_id: currentConversationId,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || '전송 실패');
+      feedbackStatusEl.textContent = '전송 완료되었습니다. 감사합니다!';
+      feedbackStatusEl.className = 'feedback-status ok';
+      setTimeout(closeFeedbackModal, 1200);
+    } catch (err) {
+      feedbackStatusEl.textContent = '전송 실패: ' + err.message;
+      feedbackStatusEl.className = 'feedback-status error';
+      feedbackSendBtn.disabled = false;
+    }
+  });
 
   // ── 사이드바: 대화 목록 (Rovo Chat 스타일 — 왼쪽에서 과거 대화를 열람) ──
 
@@ -876,9 +1038,12 @@
       messagesEl.innerHTML = '';
       started = true;
       appEl.classList.remove('landing');
-      conv.messages.forEach(m => {
+      conv.messages.forEach((m, i) => {
         const bubble = addMessage(m.role, m.content);
-        if (m.role === 'assistant') appendSources(bubble, m.sources);
+        if (m.role === 'assistant') {
+          const transcript = conv.messages.slice(0, i + 1).map(x => ({ role: x.role, content: x.content }));
+          appendMessageActions(bubble, m.sources, transcript);
+        }
       });
 
       [...convListEl.children].forEach(el => {
@@ -975,7 +1140,7 @@
           }
         }
 
-        appendSources(bubble, data.sources);
+        appendMessageActions(bubble, data.sources, [...history, { role: 'assistant', content: data.answer }]);
         history.push({ role: 'assistant', content: data.answer });
         loadConversations();
       }
