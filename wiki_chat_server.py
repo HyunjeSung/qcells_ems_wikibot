@@ -14,6 +14,7 @@ import re
 import sys
 import html
 import json
+import uuid
 import base64
 import shutil
 import zipfile
@@ -1013,12 +1014,21 @@ def _ps_single_quote(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
+WINDOWS_TEMP_DIR = "/mnt/c/Users/hyunje.sung/AppData/Local/Temp"
+
+
 def send_feedback_email(subject, body_text):
     """Outlook 데스크톱 앱(COM)을 Windows 쪽에서 자동화해 메일을 보낸다.
     WSL2에는 SMTP/Outlook 클라이언트가 없어 powershell.exe interop으로 Windows 쪽 Outlook을 조작한다.
     별도 SMTP 자격증명/앱 등록이 필요없다(로그인된 Outlook 세션을 그대로 재사용).
     이 Outlook 프로필의 기본 메일 형식이 HTML이라 .Body(평문)에 대입하면 조용히 무시되고 빈 본문으로
-    전송됨(실측 확인) — .HTMLBody를 써야 실제로 반영된다."""
+    전송됨(실측 확인) — .HTMLBody를 써야 실제로 반영된다.
+
+    스크립트는 -EncodedCommand로 커맨드라인에 직접 넘기지 않고 임시 .ps1 파일로 써서 -File로
+    실행한다 — 대화 전체를 첨부하는 긴 제보(첨부 transcript가 길면 수만 자)에서 -EncodedCommand의
+    base64 인코딩 문자열이 WSL interop이 Windows 프로세스를 띄울 때 쓰는 커맨드라인 길이 한도를
+    넘겨 "Invalid argument"로 조용히 실패하는 사고가 실측됨 — 파일 경로만 넘기면 본문 길이와
+    무관하게 커맨드라인이 항상 짧게 유지된다."""
     html_body = (
         '<html><body><pre style="font-family:Consolas,\'Malgun Gothic\',monospace;'
         'font-size:13px;white-space:pre-wrap;">' + html.escape(body_text) + "</pre></body></html>"
@@ -1032,7 +1042,6 @@ def send_feedback_email(subject, body_text):
         "$mail.Send()\n"
         "Write-Output 'SENT'\n"
     )
-    encoded = base64.b64encode(ps_script.encode("utf-16-le")).decode("ascii")
 
     def _decode(raw):
         # Windows 콘솔 리다이렉션 출력은 로케일에 따라 cp949(한글 Windows)로 나올 수 있어 utf-8을 먼저
@@ -1044,13 +1053,28 @@ def send_feedback_email(subject, body_text):
                 continue
         return raw.decode("utf-8", errors="replace")
 
+    script_name = f"wikibot_feedback_{uuid.uuid4().hex}.ps1"
+    wsl_path = os.path.join(WINDOWS_TEMP_DIR, script_name)
+    windows_path = "C:\\Users\\hyunje.sung\\AppData\\Local\\Temp\\" + script_name
     try:
+        # BOM 있는 UTF-8로 써야 Windows PowerShell(v1.0, 5.1)이 ANSI 코드페이지 대신 UTF-8로
+        # 읽는다 — BOM 없이 쓰면 한글이 깨져서 메일 본문에 물음표/mojibake로 들어감(실측).
+        with open(wsl_path, "w", encoding="utf-8-sig", newline="\n") as f:
+            f.write(ps_script)
+        # -File로 .ps1을 실행하면 -EncodedCommand와 달리 시스템 스크립트 실행 정책(기본 Restricted)에
+        # 걸려 "UnauthorizedAccess"로 막힌다(실측) — 이 프로세스 한정으로만 -ExecutionPolicy Bypass를
+        # 줘서 우회한다(시스템 전역 정책은 안 건드림).
         result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", windows_path],
             capture_output=True, timeout=30,
         )
     except Exception as e:
         return False, str(e)
+    finally:
+        try:
+            os.remove(wsl_path)
+        except OSError:
+            pass
     stdout = _decode(result.stdout)
     stderr = _decode(result.stderr)
     if result.returncode == 0 and "SENT" in stdout:
@@ -1061,6 +1085,7 @@ def send_feedback_email(subject, body_text):
 @app.route("/api/feedback", methods=["POST"])
 def feedback():
     body = request.get_json(force=True) or {}
+    author = (body.get("author") or "").strip() or "익명"
     message = (body.get("message") or "").strip()
     if not message:
         return jsonify({"error": "메시지를 입력해주세요."}), 400
@@ -1073,24 +1098,37 @@ def feedback():
     client_ip = request.remote_addr or "알 수 없음"
     user_agent = request.headers.get("User-Agent", "알 수 없음")
 
+    # transcript는 프론트에서 "수정요청" 버튼이 달린 답변까지만 잘라서 보낸다(appendMessageActions
+    # 호출부 참고) — 즉 마지막 원소가 항상 그 버튼이 달린 답변이고, 그 바로 앞이 그 답변을 유발한
+    # 질문이다. 이 두 턴을 "대상 질문/답변"으로 따로 뽑아 어떤 질문에서 제보됐는지 바로 보이게 한다.
+    target_question = ""
+    if transcript and (transcript[-1].get("role") or "") == "assistant":
+        if len(transcript) >= 2 and (transcript[-2].get("role") or "") == "user":
+            target_question = (transcript[-2].get("content") or "").strip()
+    target_index = len(transcript) - 2  # 질문 턴의 인덱스(전체 대화 덤프에서 표시할 위치)
+
+    info_lines = [f"작성자: {author}", f"시각: {submitted_at}", f"IP: {client_ip}", f"User-Agent: {user_agent}"]
+    if target_question:
+        info_lines.insert(1, f"대상 질문: {target_question}")
     parts = [
+        "[제보 정보]\n" + "\n".join(info_lines),
         f"[제보 내용]\n{message}",
-        f"[제보 정보]\n시각: {submitted_at}\nIP: {client_ip}\nUser-Agent: {user_agent}",
     ]
     turn_lines = []
-    for turn in transcript:
+    for i, turn in enumerate(transcript):
         role = turn.get("role")
         content = (turn.get("content") or "").strip()
         if not content:
             continue
         label = "질문" if role == "user" else "답변"
-        turn_lines.append(f"[{label}]\n{content}")
+        marker = " ⬅ 수정요청 대상" if i in (target_index, target_index + 1) else ""
+        turn_lines.append(f"[{label}]{marker}\n{content}")
     if turn_lines:
         parts.append("[대화 내용 전체]\n" + "\n\n".join(turn_lines))
     if conversation_id:
         parts.append(f"[대화 ID]\n{conversation_id}")
     body_text = "\n\n".join(parts)
-    subject = "[위키봇 수정요청] " + (message[:60] + ("…" if len(message) > 60 else ""))
+    subject = f"[위키봇 수정요청] {author} - " + (message[:60] + ("…" if len(message) > 60 else ""))
 
     ok, err = send_feedback_email(subject, body_text)
     if not ok:
