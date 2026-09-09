@@ -12,11 +12,12 @@ import os
 import io
 import re
 import sys
+import ssl
 import html
 import json
-import uuid
 import base64
 import shutil
+import smtplib
 import zipfile
 import subprocess
 import urllib.parse
@@ -24,6 +25,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from datetime import datetime
+from email.message import EmailMessage
 
 from flask import Flask, request, jsonify, send_from_directory
 
@@ -1007,79 +1009,41 @@ def conversation_delete(conversation_id):
 
 
 FEEDBACK_TO_ADDRESS = "hyunje.sung@qcells.com"
-
-
-def _ps_single_quote(value):
-    """PowerShell 단일따옴표 문자열 리터럴로 안전하게 이스케이프(내부에 '' 로 이스케이프)."""
-    return "'" + str(value).replace("'", "''") + "'"
-
-
-WINDOWS_TEMP_DIR = "/mnt/c/Users/hyunje.sung/AppData/Local/Temp"
+GMAIL_ADDRESS = os.environ.get("GMAIL_ADDRESS", "")
+GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 
 
 def send_feedback_email(subject, body_text):
-    """Outlook 데스크톱 앱(COM)을 Windows 쪽에서 자동화해 메일을 보낸다.
-    WSL2에는 SMTP/Outlook 클라이언트가 없어 powershell.exe interop으로 Windows 쪽 Outlook을 조작한다.
-    별도 SMTP 자격증명/앱 등록이 필요없다(로그인된 Outlook 세션을 그대로 재사용).
-    이 Outlook 프로필의 기본 메일 형식이 HTML이라 .Body(평문)에 대입하면 조용히 무시되고 빈 본문으로
-    전송됨(실측 확인) — .HTMLBody를 써야 실제로 반영된다.
+    """Gmail SMTP(smtp.gmail.com:587, STARTTLS)로 메일을 보낸다. 발신 계정은 GMAIL_ADDRESS/
+    GMAIL_APP_PASSWORD 환경변수로 지정하는 발신 전용 Gmail 계정(2단계 인증 후 발급한 앱 비밀번호
+    사용 — 일반 로그인 비밀번호로는 SMTP 인증이 막힌다). 받는 주소는 FEEDBACK_TO_ADDRESS 고정.
 
-    스크립트는 -EncodedCommand로 커맨드라인에 직접 넘기지 않고 임시 .ps1 파일로 써서 -File로
-    실행한다 — 대화 전체를 첨부하는 긴 제보(첨부 transcript가 길면 수만 자)에서 -EncodedCommand의
-    base64 인코딩 문자열이 WSL interop이 Windows 프로세스를 띄울 때 쓰는 커맨드라인 길이 한도를
-    넘겨 "Invalid argument"로 조용히 실패하는 사고가 실측됨 — 파일 경로만 넘기면 본문 길이와
-    무관하게 커맨드라인이 항상 짧게 유지된다."""
+    예전엔 Windows Outlook 데스크톱 앱을 COM으로 자동화(WSL2 전용 편법)했는데, 위키봇을 라즈베리
+    파이(Linux)에도 올리면서 플랫폼에 무관하게 동작하는 방식이 필요해져 SMTP로 전환함(사용자 확정,
+    2026-09-09) — 사내 Exchange는 순수 SMTP가 아니라 자체 프로토콜(MAPI/EWS)을 쓰고 내부 릴레이
+    주소는 IT팀만 알아서, 그걸 기다리는 대신 별도 Gmail 계정을 발신 전용으로 씀."""
+    if not GMAIL_ADDRESS or not GMAIL_APP_PASSWORD:
+        return False, "GMAIL_ADDRESS/GMAIL_APP_PASSWORD 환경변수가 설정되지 않았습니다."
+
     html_body = (
         '<html><body><pre style="font-family:Consolas,\'Malgun Gothic\',monospace;'
         'font-size:13px;white-space:pre-wrap;">' + html.escape(body_text) + "</pre></body></html>"
     )
-    ps_script = (
-        "$ol = New-Object -ComObject Outlook.Application\n"
-        "$mail = $ol.CreateItem(0)\n"
-        f"$mail.To = {_ps_single_quote(FEEDBACK_TO_ADDRESS)}\n"
-        f"$mail.Subject = {_ps_single_quote(subject)}\n"
-        f"$mail.HTMLBody = {_ps_single_quote(html_body)}\n"
-        "$mail.Send()\n"
-        "Write-Output 'SENT'\n"
-    )
+    msg = EmailMessage()
+    msg["From"] = GMAIL_ADDRESS
+    msg["To"] = FEEDBACK_TO_ADDRESS
+    msg["Subject"] = subject
+    msg.set_content(body_text)
+    msg.add_alternative(html_body, subtype="html")
 
-    def _decode(raw):
-        # Windows 콘솔 리다이렉션 출력은 로케일에 따라 cp949(한글 Windows)로 나올 수 있어 utf-8을 먼저
-        # 시도하고 실패하면 cp949로 재시도한다.
-        for enc in ("utf-8", "cp949"):
-            try:
-                return raw.decode(enc)
-            except UnicodeDecodeError:
-                continue
-        return raw.decode("utf-8", errors="replace")
-
-    script_name = f"wikibot_feedback_{uuid.uuid4().hex}.ps1"
-    wsl_path = os.path.join(WINDOWS_TEMP_DIR, script_name)
-    windows_path = "C:\\Users\\hyunje.sung\\AppData\\Local\\Temp\\" + script_name
     try:
-        # BOM 있는 UTF-8로 써야 Windows PowerShell(v1.0, 5.1)이 ANSI 코드페이지 대신 UTF-8로
-        # 읽는다 — BOM 없이 쓰면 한글이 깨져서 메일 본문에 물음표/mojibake로 들어감(실측).
-        with open(wsl_path, "w", encoding="utf-8-sig", newline="\n") as f:
-            f.write(ps_script)
-        # -File로 .ps1을 실행하면 -EncodedCommand와 달리 시스템 스크립트 실행 정책(기본 Restricted)에
-        # 걸려 "UnauthorizedAccess"로 막힌다(실측) — 이 프로세스 한정으로만 -ExecutionPolicy Bypass를
-        # 줘서 우회한다(시스템 전역 정책은 안 건드림).
-        result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", windows_path],
-            capture_output=True, timeout=30,
-        )
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=20) as server:
+            server.starttls(context=ssl.create_default_context())
+            server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+            server.send_message(msg)
     except Exception as e:
         return False, str(e)
-    finally:
-        try:
-            os.remove(wsl_path)
-        except OSError:
-            pass
-    stdout = _decode(result.stdout)
-    stderr = _decode(result.stderr)
-    if result.returncode == 0 and "SENT" in stdout:
-        return True, ""
-    return False, (stderr or stdout or "알 수 없는 오류").strip()
+    return True, ""
 
 
 @app.route("/api/feedback", methods=["POST"])
