@@ -38,14 +38,37 @@ TOKEN_ENDPOINT = "https://cf.mcp.atlassian.com/v1/token"
 # GSP1은 이름 그대로 "Global SW PM"(Global Software Product Management) 스페이스로, PRD/FRD
 # 같은 요구사항 문서가 여기서 관리된다(사용자 확인, 2026-07-31) — 처음엔 무관한 다른 제품
 # 스페이스로 오판해서 제외했었는데, 실제로는 정식으로 포함해야 하는 스페이스였음.
-# ~712020fbdcf344af074f33bf0d76cfe893cd15(AhyoungKim 개인 스페이스)는 처음엔 개별 페이지
-# 4개만 화이트리스트로 뚫었었는데(인턴 과제/드래프트 등 무관 문서가 44개 중 섞여 있어서),
-# 사용자가 이 스페이스 전체를 학습 대상에 넣기로 확정(2026-08-21) — 노이즈 위험을 감수하고
-# 스페이스 단위로 통째 포함.
-CONFLUENCE_SPACES = [
-    "EnergySW", "ACGEN2", "CWS", "GDRI", "MAG", "HP", "SIACS", "GSP1",
+# GSP("Development PM", 현행)/DP1("Development PM (old)", 구버전)은 하드웨어/시스템 PM
+# 조직도·R&R·주간회의록을 다루는 스페이스로, 이름이 비슷한 GSP1("Global SW PM", 소프트웨어
+# PM의 PRD/FRD)과는 완전히 다른 스페이스다. "김하율(Hayool Kim)의 R&R" 질문에서 이 둘이
+# 스코프 밖이라 시스템 PM 조직 R&R 문서(DP1의 "R&R" 페이지)를 못 찾은 게 실측되어(2026-09-11)
+# 사용자 확정으로 둘 다 추가.
+CONFLUENCE_TEAM_SPACES = ["EnergySW", "ACGEN2", "CWS", "GDRI", "MAG", "HP", "SIACS", "GSP1", "GSP", "DP1"]
+
+# 개인 스페이스(팀 스페이스와 별도로 관리 — 개별 확인 후 화이트리스트로 추가):
+# - ~712020fbdcf344af074f33bf0d76cfe893cd15 (AhyoungKim): 처음엔 개별 페이지 4개만 뚫었었는데
+#   (인턴 과제/드래프트 등 무관 문서가 44개 중 섞여 있어서), 사용자가 스페이스 전체를 학습
+#   대상에 넣기로 확정(2026-08-21) — 노이즈 위험을 감수하고 스페이스 단위로 통째 포함.
+# - ~63c74eb4e28ec74364cc217b (Hayool Kim): HUB-Generator/US AC System/FCAS 등 EMS 관련 노트
+#   포함 확인 후 학습 대상에 추가(2026-09-11, 사용자 지시).
+CONFLUENCE_PERSONAL_SPACES = [
     "~712020fbdcf344af074f33bf0d76cfe893cd15",
+    "~63c74eb4e28ec74364cc217b",
 ]
+
+# 개인 스페이스 키 -> 소유자 이름. 본인 기술노트엔 보통 본인 이름이 본문에 안 나오므로
+# (예: Hayool Kim 개인 스페이스의 HUB-Generator/US AC System 등은 작성자 메타데이터로만
+# 존재하고 본문엔 이름이 없음 — 실측, 2026-09-11) "참고 자료에 이름이 없다"로 그냥 답을
+# 포기하면 사용자가 보기에 이상하다("본인 페이지인데 왜 모른다는 거야?"). build_context가
+# 이 스페이스의 문서를 컨텍스트에 넣을 때 "이 문서는 {owner}님의 개인 스페이스에 있는
+# 문서"라고 라벨을 붙여서, 이름이 본문에 없어도 "이 사람이 어떤 주제를 다뤘는지"를 답할
+# 근거로 쓰게 한다(사용자 확정).
+CONFLUENCE_PERSONAL_SPACE_OWNERS = {
+    "~712020fbdcf344af074f33bf0d76cfe893cd15": "AhyoungKim",
+    "~63c74eb4e28ec74364cc217b": "Hayool Kim",
+}
+
+CONFLUENCE_SPACES = CONFLUENCE_TEAM_SPACES + CONFLUENCE_PERSONAL_SPACES
 SITE_URL = "growingenergylabs.atlassian.net"
 
 # 1차 검색이 놓친(따라갈) 연관 문서를 몇 개까지 더 조회할지. 순차 조회라 늘릴수록

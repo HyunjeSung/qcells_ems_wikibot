@@ -19,6 +19,7 @@ import base64
 import shutil
 import smtplib
 import zipfile
+import functools
 import subprocess
 import urllib.parse
 import urllib.request
@@ -30,10 +31,12 @@ from email.message import EmailMessage
 from flask import Flask, request, jsonify, send_from_directory
 
 sys.path.insert(0, str(Path(__file__).parent))
-from search_query_utils import _clean_query, _tech_query, _extract_terms, _KO_STOP  # CQL 검색어 정제용 헬퍼만 재사용 (로컬 위키 검색 자체는 미사용)
+from search_query_utils import _clean_query, _tech_query, _extract_terms, _KO_STOP, _apply_person_aliases  # CQL 검색어 정제용 헬퍼만 재사용 (로컬 위키 검색 자체는 미사용)
 from confluence_to_text import render as render_storage_html
 from bs4 import BeautifulSoup
-from atlassian_mcp_client import rovo_search, _EMPTY_BODY_NOTE
+from atlassian_mcp_client import (
+    rovo_search, _EMPTY_BODY_NOTE, _confluence_space_of, CONFLUENCE_PERSONAL_SPACE_OWNERS,
+)
 import wiki_chat_history as chat_history
 
 BASE_DIR = Path(__file__).parent
@@ -45,7 +48,18 @@ ENV_PATH = BASE_DIR / ".env.confluence"
 # EnergySW로만 좁혀서 검색하면 다른 스페이스(MAG 등)에 있는 실제 관련 문서를
 # 통째로 못 찾는다 — 실측: "Advanced TOU - TimeTable 로직 및 확인사항"은 MAG 스페이스.
 # confluence_export_multi.py가 이미 export해본 스페이스 전체를 검색 대상으로 삼는다.
-CONFLUENCE_SPACES = ["EnergySW", "ACGEN2", "CWS", "GDRI", "MAG", "HP", "SIACS", "GSP1"]
+# GSP("Development PM", 현행)/DP1("Development PM (old)", 구버전) 추가 사유는
+# atlassian_mcp_client.py의 동일 리스트 주석 참고 (2026-09-11, 사용자 확정).
+CONFLUENCE_TEAM_SPACES = ["EnergySW", "ACGEN2", "CWS", "GDRI", "MAG", "HP", "SIACS", "GSP1", "GSP", "DP1"]
+
+# 개인 스페이스(팀 스페이스와 별도 관리 — atlassian_mcp_client.py와 동일하게 유지).
+# 원래 이 파일에는 AhyoungKim 추가분이 누락돼 있었음 — 2026-09-11 동기화하며 같이 반영.
+CONFLUENCE_PERSONAL_SPACES = [
+    "~712020fbdcf344af074f33bf0d76cfe893cd15",  # AhyoungKim
+    "~63c74eb4e28ec74364cc217b",  # Hayool Kim
+]
+
+CONFLUENCE_SPACES = CONFLUENCE_TEAM_SPACES + CONFLUENCE_PERSONAL_SPACES
 _CQL_SPACE_CLAUSE = "space in (" + ", ".join(f'"{s}"' for s in CONFLUENCE_SPACES) + ")"
 
 app = Flask(__name__)
@@ -55,6 +69,12 @@ Confluence 문서를 배경지식으로 삼아 답하는 개발 어시스턴트�
 
 답변 규칙:
 - 아래 제공된 "참고 자료" 안의 내용만 근거로 답하세요. 참고 자료에 없으면 "위키/Confluence에서 해당 내용을 찾지 못했습니다"라고 말하세요
+- 참고 자료의 출처 표시에 "~~님의 개인 Confluence 스페이스 문서"라고 적혀 있으면, 그 문서는 본문에
+  그 사람 이름이 안 적혀 있어도 그 사람이 직접 작성한 본인 업무 노트입니다. "이름이 본문에
+  없어서 누구인지 모른다"고 답하지 말고, 그 문서 내용(다루는 주제/프로젝트/기술)을 "이 분이
+  다뤄온 업무"로 제시하세요 — 예: "OO님 개인 스페이스에 Generator/HUB 연동 관련 기술노트가
+  있어 해당 분야 업무를 맡고 있는 것으로 보입니다." 인물의 직책/소속까지는 이 노트만으로
+  확정할 수 없으면 그 점은 솔직히 밝히되, 노트 자체의 존재와 주제는 답변에 반드시 활용하세요
 - 참고 자료 문서 전체를 요약/나열하지 말고, 사용자 질문에 답하는 데 필요한 내용만 골라서 답하세요.
   특히 참고 자료가 PRD/FRD처럼 문서 전체를 다루는 경우, Role별 권한표(예: "Qcells Admin",
   "Fleet Partner Admin" 같은 웹 콘솔 접근 권한)나 웹/클라우드 콘솔 메뉴 이동 경로(예: "GNB 검색 →
@@ -633,6 +653,38 @@ def _rovo_search_query(query, extra_terms=None):
 # 질문만으론 내용어가 있어서(_build_search_query의 "거의 비었을 때만 이전 발화 병합"
 # 조건에 안 걸림) 이 케이스를 못 잡는다 — 확장 단계에서 최근 대화를 보고 모호한
 # 단어의 의미를 그 자리에서 확정하게 한다.
+# claude -p는 같은 prompt를 넣어도 매번 같은 키워드를 뽑아주지 않는다(LLM 샘플링 비결정성) —
+# 실측: "Hayool Kim이 누구야"를 다른 시점에 두 번 물었는데 확장 키워드가 달라져서 Rovo
+# Search 상위 3개가 완전히 다르게 잡히고, 그 결과 풍부한 답변 vs "참고 자료 없음" 답변으로
+# 크게 갈리는 사고가 재현됨(2026-09-11). 같은 질문(+같은 대화 맥락)엔 항상 같은 확장
+# 키워드를 쓰도록 prompt 문자열을 키로 캐시한다 — 사용자가 "매번 답이 달라지는 것보다
+# 일관된 게 낫다"고 확정. 캐시는 프로세스 메모리에만 있어서 서비스 재시작 시 초기화된다
+# (디스크 영속화는 지금은 불필요 — 서비스가 거의 재시작되지 않고, 재시작 후 최신 문서가
+# 반영된 새 캐시가 쌓이는 쪽이 오히려 낫다).
+@functools.lru_cache(maxsize=1000)
+def _expand_search_query_llm_call(prompt, timeout=30):
+    cmd = [
+        "claude", "-p", prompt,
+        "--output-format", "json",
+        # 시스템 프롬프트를 안 주면 기본 Claude Code 에이전트 페르소나가 실행돼서
+        # 단순 키워드 추출 대신 "이 요청을 어떻게 처리할까" 하고 헤매다 느려지거나
+        # (실측: 20초+ 타임아웃) 엉뚱한 응답(가상의 Bash 실행 서술 등)을 내놓는다.
+        # 최소한의 역할 지정 + 도구 완전 비활성화로 순수 텍스트 완성만 하게 만든다.
+        "--system-prompt", "너는 검색어 키워드만 한 줄로 출력하는 도구다. 그 외 어떤 말도 하지 마라.",
+        "--tools", "",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if result.returncode != 0:
+            return None
+        data = json.loads(result.stdout)
+        if data.get("is_error"):
+            return None
+        return data["result"].strip().splitlines()[0].strip() or None
+    except Exception:
+        return None
+
+
 def _expand_search_query(question, history=None, timeout=30):
     if not _claude_cli_available():
         return question
@@ -654,33 +706,20 @@ def _expand_search_query(question, history=None, timeout=30):
         "한 줄로 출력하고 다른 설명은 절대 붙이지 마라.\n\n"
         f"최신 질문: {question}"
     )
-    cmd = [
-        "claude", "-p", prompt,
-        "--output-format", "json",
-        # 시스템 프롬프트를 안 주면 기본 Claude Code 에이전트 페르소나가 실행돼서
-        # 단순 키워드 추출 대신 "이 요청을 어떻게 처리할까" 하고 헤매다 느려지거나
-        # (실측: 20초+ 타임아웃) 엉뚱한 응답(가상의 Bash 실행 서술 등)을 내놓는다.
-        # 최소한의 역할 지정 + 도구 완전 비활성화로 순수 텍스트 완성만 하게 만든다.
-        "--system-prompt", "너는 검색어 키워드만 한 줄로 출력하는 도구다. 그 외 어떤 말도 하지 마라.",
-        "--tools", "",
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        if result.returncode != 0:
-            return question
-        data = json.loads(result.stdout)
-        if data.get("is_error"):
-            return question
-        extra = data["result"].strip().splitlines()[0].strip()
-        # 정제된 키워드가 나왔으면 그것만 검색어로 쓴다(원문에 붙이지 않음) — Rovo Search는
-        # 짧은 키워드 질의에서 훨씬 정확한데(기존에 검증됨), 잡음 섞인 원문 문장을 그대로
-        # 이어붙이면 그 원칙과 반대로 가서 관련도가 흔들린다(실측: "Energy SW"를 물어본
-        # 대화의 후속 질문에 무관한 문장이 잔뜩 섞이자 엉뚱한 파트의 R&R 문서가 나온 사례).
-        return extra if extra else question
-    except Exception:
-        return question
+    # 정제된 키워드가 나왔으면 그것만 검색어로 쓴다(원문에 붙이지 않음) — Rovo Search는
+    # 짧은 키워드 질의에서 훨씬 정확한데(기존에 검증됨), 잡음 섞인 원문 문장을 그대로
+    # 이어붙이면 그 원칙과 반대로 가서 관련도가 흔들린다(실측: "Energy SW"를 물어본
+    # 대화의 후속 질문에 무관한 문장이 잔뜩 섞이자 엉뚱한 파트의 R&R 문서가 나온 사례).
+    extra = _expand_search_query_llm_call(prompt, timeout)
+    return extra if extra else question
 
 
+# Rovo Chat(Atlassian 네이티브)의 검색→재검색 반복 에이전트 동작을 얕게 모방하는 재시도
+# 루프를 2026-09-11에 추가했다가 같은 날 되돌렸다: claude -p 서브프로세스가 하나 더 늘어
+# 응답이 10~15초 느려지는데, LLM의 "충분한지" 판단이 호출마다 달라져 결과가 오히려
+# 들쭉날쭉해지는 게 실측됨(같은 질문인데 어떤 실행은 소스 7개, 어떤 실행은 4개). 득보다
+# 실이 커서 원래의 "원본+확장 2회 검색"으로 되돌림 — 결과가 빈약한 케이스는 재시도 루프
+# 대신 [[project_wikibot_architecture]]에 기록된 다른 방식(개인 스페이스 라벨링 등)으로 보완.
 def build_context(question, history=None):
     # 로컬 위키(docs/*.md, "1.1 ~ 24.6" 번호 체계)는 사용자 확정으로 답변 소스에서
     # 완전히 제외 — 라이브 Confluence 페이지만 근거로 쓴다(실측: 로컬 위키 청크가
@@ -697,6 +736,10 @@ def build_context(question, history=None):
     # 축소했었으나, "gem net id" 케이스(질문 확장이 엉뚱한 방향으로 튀면서 정답 문서가
     # 3위 밖으로 밀려 아예 안 잡힘)가 실측되어 사용자 확정으로 다시 5로 되돌림
     # (2026-08-19) — 표-노이즈 리스크가 재발하면 그때 다시 조정.
+    # 검색용으로만 인물 한글 이름 -> 영문 표기를 보강(원문 question 자체는 바꾸지 않음 —
+    # 이 함수는 build_context 로컬 변수만 다루고, 대화 이력/최종 답변 프롬프트에 쓰이는
+    # 원문은 history 쪽에 그대로 남아있다).
+    question = _apply_person_aliases(question)
     expanded_question = _expand_search_query(question, history)
     original_terms = [t for t in _extract_terms(question) if t not in _GENERIC_KO_WORDS]
     original_query = " ".join(original_terms) if original_terms else question
@@ -763,8 +806,10 @@ def build_context(question, history=None):
     for p in live_pages:
         kind = "Jira" if p.get("type") == "issue" else "Confluence"
         label_type = "jira" if p.get("type") == "issue" else "confluence"
-        parts.append(f"[출처: {kind}(live, Rovo Search) - {p['title']} | URL: {p['url']}]\n{p['text']}"
-                     if using_rovo else f"[출처: Confluence(live) - {p['title']} | URL: {p['url']}]\n{p['text']}")
+        owner = CONFLUENCE_PERSONAL_SPACE_OWNERS.get(_confluence_space_of(p.get("url")))
+        owner_note = f", {owner}님의 개인 Confluence 스페이스 문서" if owner else ""
+        parts.append(f"[출처: {kind}(live, Rovo Search{owner_note}) - {p['title']} | URL: {p['url']}]\n{p['text']}"
+                     if using_rovo else f"[출처: Confluence(live{owner_note}) - {p['title']} | URL: {p['url']}]\n{p['text']}")
         sources.append({"type": label_type, "label": p["title"], "url": p["url"]})
 
     return "\n\n---\n\n".join(parts), sources

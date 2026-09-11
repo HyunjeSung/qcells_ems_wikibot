@@ -29,6 +29,23 @@ _KO_PARTICLE = re.compile(r'(?<=[가-힣\w])([이가은는을를의에서에로�
 _TECH_TERMS = re.compile(r'[A-Za-z0-9][A-Za-z0-9_./\-]*')  # 영문·숫자 기술 용어
 _KOREAN_TERMS = re.compile(r'[가-힣]{2,}')
 
+# 사람 이름의 한글 표기 -> Confluence 상 실제 영문 표기. Rovo/CQL 검색은 원문 문자열
+# 그대로 매치하므로, 한글 질문("김하율")이 본문/작성자 필드의 영문 표기("Hayool Kim")와
+# 전혀 안 겹치면 검색 결과가 0건이 된다(실측, 2026-09-11 — 김하율 개인 스페이스를
+# 학습 목록에 추가한 직후에도 "김하율프로가 누구야"에 답을 못 찾음). 한글 이름의 로마자
+# 표기는 규칙적으로 유추가 안 되므로("하율" -> Hayul/Hayool/Ha-yul 등) _expand_search_query의
+# LLM 동의어 확장에 맡기지 않고 여기서 명시적으로 고정한다.
+_PERSON_NAME_ALIASES = {
+    "김하율": "Hayool Kim",
+}
+
+
+def _apply_person_aliases(query: str) -> str:
+    """알려진 인물의 한글 이름이 질문에 있으면 검색용으로 영문 표기를 덧붙인다
+    (원문 치환이 아니라 부가 — 한글 표기로 매치되는 다른 문서가 있으면 그것도 유지)."""
+    extra = [en for ko, en in _PERSON_NAME_ALIASES.items() if ko in query]
+    return query + " " + " ".join(extra) if extra else query
+
 
 def _clean_query(query: str) -> str:
     q = _KO_STOP.sub(' ', query)
