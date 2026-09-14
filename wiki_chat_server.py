@@ -19,7 +19,6 @@ import base64
 import shutil
 import smtplib
 import zipfile
-import functools
 import subprocess
 import urllib.parse
 import urllib.request
@@ -32,6 +31,7 @@ from flask import Flask, request, jsonify, send_from_directory
 
 sys.path.insert(0, str(Path(__file__).parent))
 from search_query_utils import _clean_query, _tech_query, _extract_terms, _KO_STOP, _apply_person_aliases  # CQL 검색어 정제용 헬퍼만 재사용 (로컬 위키 검색 자체는 미사용)
+from query_expansion import _expand_search_query  # claude -p 검색어 확장 프롬프트 엔지니어링 전담 모듈
 from confluence_to_text import render as render_storage_html
 from bs4 import BeautifulSoup
 from atlassian_mcp_client import (
@@ -639,79 +639,8 @@ def _rovo_search_query(query, extra_terms=None):
     return " ".join(terms) if terms else query
 
 
-# Rovo Chat은 검색 전에 스스로 검색어를 LLM으로 재구성한다(실측: "DeviceManager
-# 동작원리"라는 질문을 "device manager 동작원리 architecture"로 확장해서 검색 —
-# 사용자 질문엔 없던 "architecture"를 추가해서 그 단어가 제목에 들어간 문서를 찾아냄).
-# _rovo_search_query는 원문에서 불용어만 제거하는 단순 추출이라 이런 동의어/영문
-# 전문용어 확장을 못 해서, 같은 개념이 다른 용어로 적힌 문서를 놓친다. claude -p로
-# 검색어를 확장하는 단계를 추가해서 이 격차를 좁힌다. 실패/타임아웃 시 원문 그대로
-# 진행(검색 자체를 막으면 안 되므로 조용히 폴백).
-#
-# 대화 맥락도 같이 넘긴다 — 실측: "Energy SW 인원 정보/담당업무"를 논의하던 대화의
-# 후속 질문 "담당업무 로테이션으로 바꾸고 싶은데"가 맥락 없이 확장되면 "로테이션"만
-# 보고 System Log 앱의 로그파일 로테이션 기능 문서로 완전히 엉뚱하게 매칭됨. 최신
-# 질문만으론 내용어가 있어서(_build_search_query의 "거의 비었을 때만 이전 발화 병합"
-# 조건에 안 걸림) 이 케이스를 못 잡는다 — 확장 단계에서 최근 대화를 보고 모호한
-# 단어의 의미를 그 자리에서 확정하게 한다.
-# claude -p는 같은 prompt를 넣어도 매번 같은 키워드를 뽑아주지 않는다(LLM 샘플링 비결정성) —
-# 실측: "Hayool Kim이 누구야"를 다른 시점에 두 번 물었는데 확장 키워드가 달라져서 Rovo
-# Search 상위 3개가 완전히 다르게 잡히고, 그 결과 풍부한 답변 vs "참고 자료 없음" 답변으로
-# 크게 갈리는 사고가 재현됨(2026-09-11). 같은 질문(+같은 대화 맥락)엔 항상 같은 확장
-# 키워드를 쓰도록 prompt 문자열을 키로 캐시한다 — 사용자가 "매번 답이 달라지는 것보다
-# 일관된 게 낫다"고 확정. 캐시는 프로세스 메모리에만 있어서 서비스 재시작 시 초기화된다
-# (디스크 영속화는 지금은 불필요 — 서비스가 거의 재시작되지 않고, 재시작 후 최신 문서가
-# 반영된 새 캐시가 쌓이는 쪽이 오히려 낫다).
-@functools.lru_cache(maxsize=1000)
-def _expand_search_query_llm_call(prompt, timeout=30):
-    cmd = [
-        "claude", "-p", prompt,
-        "--output-format", "json",
-        # 시스템 프롬프트를 안 주면 기본 Claude Code 에이전트 페르소나가 실행돼서
-        # 단순 키워드 추출 대신 "이 요청을 어떻게 처리할까" 하고 헤매다 느려지거나
-        # (실측: 20초+ 타임아웃) 엉뚱한 응답(가상의 Bash 실행 서술 등)을 내놓는다.
-        # 최소한의 역할 지정 + 도구 완전 비활성화로 순수 텍스트 완성만 하게 만든다.
-        "--system-prompt", "너는 검색어 키워드만 한 줄로 출력하는 도구다. 그 외 어떤 말도 하지 마라.",
-        "--tools", "",
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        if result.returncode != 0:
-            return None
-        data = json.loads(result.stdout)
-        if data.get("is_error"):
-            return None
-        return data["result"].strip().splitlines()[0].strip() or None
-    except Exception:
-        return None
-
-
-def _expand_search_query(question, history=None, timeout=30):
-    if not _claude_cli_available():
-        return question
-    context_block = ""
-    if history and len(history) > 1:
-        recent = history[:-1][-4:]  # 최신 질문 이전 최근 2턴 정도
-        lines = []
-        for m in recent:
-            speaker = "사용자" if m.get("role") == "user" else "위키봇"
-            content = (m.get("content") or "")[:300]
-            lines.append(f"[{speaker}] {content}")
-        context_block = "이전 대화 맥락(최신 질문의 모호한 단어 뜻을 여기서 판단):\n" + "\n".join(lines) + "\n\n"
-    prompt = (
-        f"{context_block}"
-        "다음은 사내 기술 위키/Confluence 검색에 쓸 최신 질문이다. 위 대화 맥락이 "
-        "있다면 그 맥락에 맞춰 질문 속 모호한 단어의 의미를 확정한 뒤, 이 질문과 "
-        "관련된 영어/한글 핵심 키워드나 동의어를 3~6개 뽑아라(예: '동작원리'면 "
-        "'architecture', '구조'도 후보). 검색어로 쓸 키워드만 공백으로 구분해서 "
-        "한 줄로 출력하고 다른 설명은 절대 붙이지 마라.\n\n"
-        f"최신 질문: {question}"
-    )
-    # 정제된 키워드가 나왔으면 그것만 검색어로 쓴다(원문에 붙이지 않음) — Rovo Search는
-    # 짧은 키워드 질의에서 훨씬 정확한데(기존에 검증됨), 잡음 섞인 원문 문장을 그대로
-    # 이어붙이면 그 원칙과 반대로 가서 관련도가 흔들린다(실측: "Energy SW"를 물어본
-    # 대화의 후속 질문에 무관한 문장이 잔뜩 섞이자 엉뚱한 파트의 R&R 문서가 나온 사례).
-    extra = _expand_search_query_llm_call(prompt, timeout)
-    return extra if extra else question
+# 검색어 확장(claude -p 프롬프트 엔지니어링)은 query_expansion.py로 분리됨 —
+# _expand_search_query/_expand_search_query_llm_call 정의는 그쪽 참고.
 
 
 # Rovo Chat(Atlassian 네이티브)의 검색→재검색 반복 에이전트 동작을 얕게 모방하는 재시도
@@ -910,6 +839,7 @@ def call_claude_cli(history, context, timeout=180):
 
     cmd = [
         "claude", "-p", prompt,
+        "--model", "sonnet",
         "--output-format", "json",
         "--system-prompt", SYSTEM_PROMPT,
         # --disallowedTools(차단 목록)는 mcp__atlassian__* 같은 MCP 도구는 안 걸러서,

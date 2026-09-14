@@ -399,7 +399,7 @@
     color: var(--text);
   }
   .feedback-hint { color: var(--text-dim); font-weight: normal; font-size: 12px; }
-  #feedbackAuthor, #feedbackMessage {
+  #feedbackMessage {
     width: 100%;
     background: var(--input-bg);
     border: 1px solid var(--border);
@@ -555,10 +555,6 @@
 <div id="feedbackOverlay" class="feedback-overlay hidden">
   <div class="feedback-modal">
     <h3>수정요청 보내기</h3>
-    <div class="feedback-field">
-      <label for="feedbackAuthor">작성자(이름) <span class="feedback-hint">익명가능</span></label>
-      <input type="text" id="feedbackAuthor" />
-    </div>
     <div class="feedback-field">
       <label for="feedbackMessage">내용 <span class="feedback-hint">예: Jira 티켓 연동이 안 됩니다. / 이 부분 답변이 사실과 다릅니다...</span></label>
       <textarea id="feedbackMessage" rows="4"></textarea>
@@ -938,7 +934,6 @@
   // ── 수정요청(피드백) 이메일 ──
 
   const feedbackOverlay = document.getElementById('feedbackOverlay');
-  const feedbackAuthorEl = document.getElementById('feedbackAuthor');
   const feedbackMessageEl = document.getElementById('feedbackMessage');
   const feedbackStatusEl = document.getElementById('feedbackStatus');
   const feedbackCancelBtn = document.getElementById('feedbackCancelBtn');
@@ -947,13 +942,12 @@
 
   function openFeedbackModal(transcript) {
     feedbackContext = { transcript: transcript || [] };
-    feedbackAuthorEl.value = localStorage.getItem('feedbackAuthor') || '';
     feedbackMessageEl.value = '';
     feedbackStatusEl.textContent = '';
     feedbackStatusEl.className = 'feedback-status';
     feedbackSendBtn.disabled = false;
     feedbackOverlay.classList.remove('hidden');
-    feedbackAuthorEl.focus();
+    feedbackMessageEl.focus();
   }
 
   function closeFeedbackModal() {
@@ -966,7 +960,6 @@
   });
 
   feedbackSendBtn.addEventListener('click', async () => {
-    const author = feedbackAuthorEl.value.trim();
     const message = feedbackMessageEl.value.trim();
     if (!message) {
       feedbackStatusEl.textContent = '보낼 내용을 입력해주세요.';
@@ -974,15 +967,12 @@
       feedbackMessageEl.focus();
       return;
     }
-    if (author) localStorage.setItem('feedbackAuthor', author);
-    else localStorage.removeItem('feedbackAuthor');
     feedbackSendBtn.disabled = true;
     try {
       const res = await fetch('/api/feedback', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          author,
           message,
           transcript: feedbackContext.transcript,
           conversation_id: currentConversationId,
