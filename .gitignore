@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .env
 .env.confluence
+wikibot.env
 .wiki_chat_history.db
 .confluence_live_images/
 *:Zone.Identifier

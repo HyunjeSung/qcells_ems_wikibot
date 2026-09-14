@@ -27,7 +27,7 @@ from pathlib import Path
 from datetime import datetime
 from email.message import EmailMessage
 
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, session, redirect, url_for, render_template_string
 
 sys.path.insert(0, str(Path(__file__).parent))
 from search_query_utils import _clean_query, _tech_query, _extract_terms, _KO_STOP, _apply_person_aliases  # CQL 검색어 정제용 헬퍼만 재사용 (로컬 위키 검색 자체는 미사용)
@@ -63,6 +63,73 @@ CONFLUENCE_SPACES = CONFLUENCE_TEAM_SPACES + CONFLUENCE_PERSONAL_SPACES
 _CQL_SPACE_CLAUSE = "space in (" + ", ".join(f'"{s}"' for s in CONFLUENCE_SPACES) + ")"
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("ADMIN_SECRET_KEY") or os.urandom(32)
+
+# --admin 플래그로 띄운 인스턴스는 일반 인스턴스와 같은 UI/기능을 쓰되 (1) 로그인이 걸리고
+# (2) 소프트 삭제된 대화도 필터링하지 않는다.
+ADMIN_MODE = "--admin" in sys.argv
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "")
+ADMIN_PASSWORD_HASH = os.environ.get("ADMIN_PASSWORD_HASH", "")
+
+_ADMIN_LOGIN_EXEMPT_PATHS = {"/login", "/health"}
+
+_ADMIN_LOGIN_PAGE = """
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>위키봇 관리자 로그인</title>
+<style>
+  body { font-family: -apple-system, sans-serif; background: #0f1115; color: #e6e6e6;
+         display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+  form { background: #1a1d24; padding: 2rem 2.5rem; border-radius: 12px; width: 280px; }
+  h1 { font-size: 1.1rem; margin: 0 0 1.2rem; }
+  input { width: 100%; box-sizing: border-box; padding: 0.6rem 0.7rem; margin-bottom: 0.8rem;
+          border-radius: 6px; border: 1px solid #333; background: #0f1115; color: #e6e6e6; }
+  button { width: 100%; padding: 0.6rem; border: none; border-radius: 6px; background: #4a7dfc;
+           color: white; font-weight: 600; cursor: pointer; }
+  .err { color: #ff6b6b; font-size: 0.85rem; margin-bottom: 0.8rem; }
+</style></head>
+<body>
+  <form method="post">
+    <h1>위키봇 관리자 로그인</h1>
+    {% if error %}<div class="err">{{ error }}</div>{% endif %}
+    <input name="username" placeholder="아이디" autofocus>
+    <input name="password" type="password" placeholder="비밀번호">
+    <button type="submit">로그인</button>
+  </form>
+</body></html>
+"""
+
+
+def _check_admin_credentials(username, password):
+    from werkzeug.security import check_password_hash
+
+    if not ADMIN_USERNAME or not ADMIN_PASSWORD_HASH:
+        return False
+    return username == ADMIN_USERNAME and check_password_hash(ADMIN_PASSWORD_HASH, password)
+
+
+if ADMIN_MODE:
+    @app.before_request
+    def _require_admin_login():
+        if request.path in _ADMIN_LOGIN_EXEMPT_PATHS or request.path.startswith("/confluence-images/") or request.path.startswith("/wiki-images/"):
+            return None
+        if not session.get("admin"):
+            return redirect(url_for("admin_login", next=request.path))
+        return None
+
+    @app.route("/login", methods=["GET", "POST"])
+    def admin_login():
+        error = None
+        if request.method == "POST":
+            if _check_admin_credentials(request.form.get("username", ""), request.form.get("password", "")):
+                session["admin"] = True
+                return redirect(request.args.get("next") or url_for("index"))
+            error = "아이디 또는 비밀번호가 올바르지 않습니다."
+        return render_template_string(_ADMIN_LOGIN_PAGE, error=error)
+
+    @app.route("/logout", methods=["POST"])
+    def admin_logout():
+        session.clear()
+        return redirect(url_for("admin_login"))
 
 SYSTEM_PROMPT = """당신은 "Qcells EMS 위키봇"입니다. QCells EMS(Energy Management System) 팀의
 Confluence 문서를 배경지식으로 삼아 답하는 개발 어시스턴트입니다.
@@ -966,12 +1033,12 @@ def chat():
 
 @app.route("/api/conversations")
 def conversations():
-    return jsonify({"conversations": chat_history.list_conversations()})
+    return jsonify({"conversations": chat_history.list_conversations(include_deleted=ADMIN_MODE)})
 
 
 @app.route("/api/conversations/<conversation_id>")
 def conversation_detail(conversation_id):
-    conv = chat_history.get_conversation(conversation_id)
+    conv = chat_history.get_conversation(conversation_id, include_deleted=ADMIN_MODE)
     if conv is None:
         return jsonify({"error": "대화를 찾을 수 없습니다."}), 404
     return jsonify(conv)
@@ -1080,11 +1147,21 @@ def health():
     return jsonify({"status": "ok"})
 
 
+@app.route("/api/whoami")
+def whoami():
+    return jsonify({"admin": bool(ADMIN_MODE)})
+
+
 def main():
     port = 8010
     if "--port" in sys.argv:
         port = int(sys.argv[sys.argv.index("--port") + 1])
-    print(f"🤖 Qcells EMS 위키봇 서버 시작 → http://localhost:{port}")
+    if ADMIN_MODE:
+        if not ADMIN_USERNAME or not ADMIN_PASSWORD_HASH:
+            print("[admin] 경고: ADMIN_USERNAME/ADMIN_PASSWORD_HASH가 설정되지 않아 아무도 로그인할 수 없습니다.")
+        print(f"🔐 Qcells EMS 위키봇 (관리자 모드) 서버 시작 → http://localhost:{port}")
+    else:
+        print(f"🤖 Qcells EMS 위키봇 서버 시작 → http://localhost:{port}")
     app.run(host="0.0.0.0", port=port, debug=False)
 
 

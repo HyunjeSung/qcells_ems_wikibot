@@ -48,6 +48,11 @@ def init_db():
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id)")
+
+        existing_cols = {row["name"] for row in conn.execute("PRAGMA table_info(conversations)")}
+        if "deleted_at" not in existing_cols:
+            conn.execute("ALTER TABLE conversations ADD COLUMN deleted_at TEXT")
+
         conn.commit()
 
 
@@ -116,21 +121,22 @@ def replace_last_message(conversation_id, role, content, sources=None):
         conn.commit()
 
 
-def list_conversations(limit=100):
+def list_conversations(limit=100, include_deleted=False):
+    query = "SELECT id, title, created_at, updated_at, deleted_at FROM conversations"
+    if not include_deleted:
+        query += " WHERE deleted_at IS NULL"
+    query += " ORDER BY updated_at DESC LIMIT ?"
     with closing(_connect()) as conn:
-        rows = conn.execute(
-            "SELECT id, title, created_at, updated_at FROM conversations ORDER BY updated_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
+        rows = conn.execute(query, (limit,)).fetchall()
     return [dict(r) for r in rows]
 
 
-def get_conversation(conversation_id):
+def get_conversation(conversation_id, include_deleted=False):
+    query = "SELECT id, title, created_at, updated_at, deleted_at FROM conversations WHERE id = ?"
+    if not include_deleted:
+        query += " AND deleted_at IS NULL"
     with closing(_connect()) as conn:
-        conv = conn.execute(
-            "SELECT id, title, created_at, updated_at FROM conversations WHERE id = ?",
-            (conversation_id,),
-        ).fetchone()
+        conv = conn.execute(query, (conversation_id,)).fetchone()
         if conv is None:
             return None
         rows = conn.execute(
@@ -151,6 +157,26 @@ def get_conversation(conversation_id):
 
 
 def delete_conversation(conversation_id):
+    """사용자용 삭제 — 소프트 삭제. 사이드바/조회에서 숨겨지지만 admin은 계속 볼 수 있다."""
+    with closing(_connect()) as conn:
+        conn.execute(
+            "UPDATE conversations SET deleted_at = ? WHERE id = ?",
+            (_now(), conversation_id),
+        )
+        conn.commit()
+
+
+def restore_conversation(conversation_id):
+    with closing(_connect()) as conn:
+        conn.execute(
+            "UPDATE conversations SET deleted_at = NULL WHERE id = ?",
+            (conversation_id,),
+        )
+        conn.commit()
+
+
+def purge_conversation(conversation_id):
+    """admin 전용 완전 삭제 — 되돌릴 수 없음."""
     with closing(_connect()) as conn:
         conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
         conn.commit()

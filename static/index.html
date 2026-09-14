@@ -189,6 +189,21 @@
   }
   #themeToggleBtn:hover { border-color: var(--accent); color: var(--text); }
   #themeToggleBtn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  #logoutBtn {
+    display: none;
+    margin-left: 8px;
+    height: 32px;
+    padding: 0 12px;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-raised);
+    color: var(--text-dim);
+    font-size: 13px;
+    cursor: pointer;
+  }
+  #logoutBtn:hover { border-color: var(--accent); color: var(--text); }
 
   /* 대화 시작 전: 화면 중앙에 타이틀 + 입력창 */
   #app.landing #messages { display: none; }
@@ -533,6 +548,7 @@
       <button id="sidebarOpenBtn" type="button" title="사이드바 펼치기">▸</button>
       <span class="name">Qcells EMS 위키봇</span>
       <button id="themeToggleBtn" type="button" title="테마 전환"></button>
+      <button id="logoutBtn" type="button">로그아웃</button>
     </header>
     <div id="stage">
       <div class="landing-title">Qcells EMS 위키봇</div>
@@ -580,6 +596,15 @@
   const sidebarCollapseBtn = document.getElementById('sidebarCollapseBtn');
   const sidebarOpenBtn = document.getElementById('sidebarOpenBtn');
   const themeToggleBtn = document.getElementById('themeToggleBtn');
+  const logoutBtn = document.getElementById('logoutBtn');
+
+  logoutBtn.addEventListener('click', async () => {
+    await fetch('/logout', { method: 'POST' });
+    location.reload();
+  });
+  fetch('/api/whoami').then(r => r.json()).then(data => {
+    if (data.admin) logoutBtn.style.display = 'flex';
+  }).catch(() => {});
 
   let history = [];
   let started = false;
