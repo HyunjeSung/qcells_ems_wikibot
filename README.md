@@ -103,6 +103,41 @@ python3 wiki_chat_server.py --port 8010
 `.env.confluence`에 `ATLASSIAN_EMAIL`/`ATLASSIAN_API_TOKEN`/`ATLASSIAN_BASE_URL`을 설정한다
 (`.gitignore`에 포함되어 있으니 커밋되지 않는다).
 
+## Claude Code 슬래시 커맨드 (`/wikibot-api`)
+
+이 웹앱을 띄우지 않고도, **Claude Code 세션에 붙어있는 `atlassian` MCP를 직접 써서** 같은
+Confluence 스페이스를 검색하고 그 결과를 지금 작업 중인 코드에 바로 반영하는 슬래시 커맨드다.
+"위키봇에 물어보고 → 답변 복사 → 코드에 붙여넣기"의 2단계를 1단계로 줄인다. 커맨드 정의는
+[`claude-commands/wikibot-api.md`](claude-commands/wikibot-api.md)에 있다.
+
+### 설치
+
+```bash
+mkdir -p ~/.claude/commands
+cp claude-commands/wikibot-api.md ~/.claude/commands/wikibot-api.md
+```
+
+프로젝트 한정으로만 쓰려면 `~/.claude/commands/` 대신 해당 프로젝트의 `.claude/commands/`에
+복사한다.
+
+### 필요 조건
+
+- Claude Code에 `atlassian` MCP가 등록되어 있어야 한다(이 웹앱과 별개로, Claude Code 자체
+  설정):
+  ```bash
+  claude mcp add --transport http atlassian https://mcp.atlassian.com/v1/mcp
+  ```
+  등록 후 첫 사용 시 OAuth 로그인 창이 뜬다. `claude mcp list`로 `atlassian ... Connected`가
+  뜨면 준비 완료 — 이 웹앱(`wiki_chat_server.py`)의 `atlassian_mcp_client.py`, `claude -p` 합성
+  파이프라인, Flask 서버 기동 중 아무것도 필요 없다.
+
+### 사용
+
+Claude Code 세션에서:
+```
+/wikibot-api <검색어 + 반영할 코드 작업 설명>
+```
+
 ## 참고
 
 - 답변 소스는 라이브 Confluence 페이지로 한정되어 있다(이 리포에는 위키 문서 자체가 포함돼
