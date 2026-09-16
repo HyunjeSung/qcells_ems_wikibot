@@ -1050,6 +1050,20 @@ def conversation_delete(conversation_id):
     return jsonify({"ok": True})
 
 
+@app.route("/api/conversations/<conversation_id>/restore", methods=["POST"])
+def conversation_restore(conversation_id):
+    chat_history.restore_conversation(conversation_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/conversations/<conversation_id>/purge", methods=["DELETE"])
+def conversation_purge(conversation_id):
+    if not ADMIN_MODE:
+        return jsonify({"error": "관리자 전용 기능입니다."}), 403
+    chat_history.purge_conversation(conversation_id)
+    return jsonify({"ok": True})
+
+
 FEEDBACK_TO_ADDRESS = "hyunje.sung@qcells.com"
 GMAIL_ADDRESS = os.environ.get("GMAIL_ADDRESS", "")
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")

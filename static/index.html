@@ -141,6 +141,10 @@
   }
   .conv-item:hover .del { opacity: 1; }
   .conv-item .del:hover { color: var(--accent); }
+  .conv-item.deleted { opacity: 0.5; }
+  .conv-item.deleted .title { text-decoration: line-through; }
+  .conv-item.deleted .del { opacity: 1; font-size: 11px; }
+  .conv-item.deleted .del:hover { color: var(--accent); }
   #convEmpty {
     color: var(--text-dim);
     font-size: 12.5px;
@@ -1032,8 +1036,9 @@
       return;
     }
     list.forEach(conv => {
+      const isDeleted = !!conv.deleted_at;
       const item = document.createElement('div');
-      item.className = 'conv-item' + (conv.id === currentConversationId ? ' active' : '');
+      item.className = 'conv-item' + (conv.id === currentConversationId ? ' active' : '') + (isDeleted ? ' deleted' : '');
       item.dataset.id = conv.id;
 
       const title = document.createElement('span');
@@ -1041,18 +1046,46 @@
       title.textContent = conv.title;
       item.appendChild(title);
 
-      const del = document.createElement('button');
-      del.className = 'del';
-      del.type = 'button';
-      del.textContent = '✕';
-      del.title = '대화 삭제';
-      del.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        await fetch('/api/conversations/' + conv.id, { method: 'DELETE' });
-        if (conv.id === currentConversationId) startNewChat();
-        loadConversations();
-      });
-      item.appendChild(del);
+      if (isDeleted) {
+        const restore = document.createElement('button');
+        restore.className = 'del';
+        restore.type = 'button';
+        restore.textContent = '↺';
+        restore.title = '대화 복구';
+        restore.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          await fetch('/api/conversations/' + conv.id + '/restore', { method: 'POST' });
+          loadConversations();
+        });
+        item.appendChild(restore);
+
+        const purge = document.createElement('button');
+        purge.className = 'del';
+        purge.type = 'button';
+        purge.textContent = '🗑';
+        purge.title = '완전 삭제 (복구 불가)';
+        purge.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          if (!confirm('이 대화를 완전히 삭제할까요? 복구할 수 없습니다.')) return;
+          await fetch('/api/conversations/' + conv.id + '/purge', { method: 'DELETE' });
+          if (conv.id === currentConversationId) startNewChat();
+          loadConversations();
+        });
+        item.appendChild(purge);
+      } else {
+        const del = document.createElement('button');
+        del.className = 'del';
+        del.type = 'button';
+        del.textContent = '✕';
+        del.title = '대화 삭제';
+        del.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          await fetch('/api/conversations/' + conv.id, { method: 'DELETE' });
+          if (conv.id === currentConversationId) startNewChat();
+          loadConversations();
+        });
+        item.appendChild(del);
+      }
 
       item.addEventListener('click', () => selectConversation(conv.id));
       convListEl.appendChild(item);
