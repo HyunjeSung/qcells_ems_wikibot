@@ -48,7 +48,7 @@ def _expand_search_query_llm_call(prompt, timeout=30):
         # (실측: 20초+ 타임아웃) 엉뚱한 응답(가상의 Bash 실행 서술 등)을 내놓는다.
         # 최소한의 역할 지정 + 도구 완전 비활성화로 순수 JSON 완성만 하게 만든다.
         "--system-prompt",
-        '너는 검색어 키워드 JSON만 출력하는 도구다. 반드시 {"keywords": ["...", ...]} '
+        '너는 검색어 JSON만 출력하는 도구다. 반드시 {"core": "...", "keywords": ["...", ...]} '
         "형식 하나만 출력하고, 코드펜스나 다른 설명은 절대 붙이지 마라.",
         "--tools", "",
     ]
@@ -59,13 +59,15 @@ def _expand_search_query_llm_call(prompt, timeout=30):
         data = json.loads(result.stdout)
         if data.get("is_error"):
             return None
-        return _parse_keywords(data["result"])
+        return _parse_expansion(data["result"])
     except Exception:
         return None
 
 
-def _parse_keywords(raw_text):
-    """모델 출력에서 {"keywords": [...]}를 뽑아 공백 구분 문자열로 합친다.
+def _parse_expansion(raw_text):
+    """모델 출력에서 {"core": "...", "keywords": [...]}를 뽑아 (core, keywords_str)로
+    반환한다. core가 비어있으면 keywords 첫 항목으로 대체(모델이 core를 빠뜨려도
+    완전히 못 쓰게 되지 않도록).
 
     지시에도 불구하고 ```json 코드펜스나 앞뒤 설명을 붙이는 경우가 있어서,
     첫 '{'~마지막 '}' 구간만 잘라 파싱한다(관대한 파싱 — 실패하면 그냥 폴백)."""
@@ -80,7 +82,10 @@ def _parse_keywords(raw_text):
     if not isinstance(keywords, list):
         return None
     cleaned = [str(k).strip() for k in keywords if str(k).strip()]
-    return " ".join(cleaned) if cleaned else None
+    if not cleaned:
+        return None
+    core = str(obj.get("core") or "").strip() or cleaned[0]
+    return core, " ".join(cleaned)
 
 
 # 프롬프트를 <섹션> 태그로 구조화하고, 규칙을 줄글로 설명하는 대신 실제 실패
@@ -95,6 +100,15 @@ def _parse_keywords(raw_text):
 #   새서 검색을 망쳤던 사고(2026-08-19)의 재발 방지용 반례
 # - 로테이션(대화맥락 포함): 맥락 의존 중의성 해소 축 — 맥락 없이 로그 로테이션
 #   기능으로 오매칭됐던 사고의 재발 방지용 반례
+# - 장승혁(슬래시 표기+호칭+의문사): "core" 필드가 문법적 잡음(조사/호칭/의문사/
+#   구분자)을 걸러내는 것을 보여주는 예시. 2026-09-17 이전엔 이런 잡음을
+#   wiki_chat_server.py의 정규식 불용어 목록(_GENERIC_KO_WORDS)에 하나씩
+#   손으로 추가하는 방식이었는데("프로"/"님"/"씨"/"누구야"/"/" 등), 사용자가
+#   "이거 하나하나 룰베이스로 하면 끝도 없어, 좋은 방법 없니?"라고 직접 지적
+#   해서 이 잡음 제거 자체를 LLM에게 맡기는 쪽으로 구조를 바꿨다 — 새로운
+#   잡음 패턴이 나올 때마다 정규식을 또 추가하는 대신, 아래 <instructions>의
+#   "core" 정의(문법적 잡음만 제거, 의미 변형 없음)를 모델이 일반화해서
+#   따르게 한다.
 #
 # "홍길동 프로" 변형을 뺀 이유(2026-09-17): 예전엔 인물 이름에 "프로" 호칭을 붙이는
 # 변형을 항상 만들게 했는데, 실측해보니 이 회사 문서(특히 주간업무 보고서)는 거의
@@ -107,52 +121,71 @@ def _parse_keywords(raw_text):
 # 채택 안 함 — 아래 <instructions>에도 이 축을 명시.
 _FEWSHOT_EXAMPLES = """<example>
 <question>DeviceManager 동작원리 알려줘</question>
-<output>{"keywords": ["DeviceManager", "동작원리", "architecture", "구조", "design"]}</output>
+<output>{"core": "DeviceManager 동작원리", "keywords": ["DeviceManager", "동작원리", "architecture", "구조", "design"]}</output>
 </example>
 <example>
 <question>BMS가 뭐야</question>
-<output>{"keywords": ["BMS", "Battery Management System", "배터리 관리 시스템"]}</output>
+<output>{"core": "BMS", "keywords": ["BMS", "Battery Management System", "배터리 관리 시스템"]}</output>
 </example>
 <example>
 <question>홍길동이 뭐야</question>
-<output>{"keywords": ["홍길동", "Gildong Hong", "gildong.hong", "gildonghong"]}</output>
+<output>{"core": "홍길동", "keywords": ["홍길동", "Gildong Hong", "gildong.hong", "gildonghong"]}</output>
 </example>
 <example>
 <question>gem net id 가 ffff 가 아닌 예시 찾아줘</question>
-<output>{"keywords": ["GEM", "Net ID", "GEM Net ID", "GEM-NET-ID", "gem_net_id", "non-FFFF"]}</output>
+<output>{"core": "gem net id ffff 아닌 예시", "keywords": ["GEM", "Net ID", "GEM Net ID", "GEM-NET-ID", "gem_net_id", "non-FFFF"]}</output>
 </example>
 <example>
 <context>[사용자] Energy SW 인원 정보 알려줘
 [위키봇] (인원 명단 답변)</context>
 <question>담당업무 로테이션으로 바꾸고 싶은데</question>
-<output>{"keywords": ["Energy SW", "담당업무", "로테이션", "Job Rotation", "직무순환", "인사이동"]}</output>
+<output>{"core": "Energy SW 담당업무 로테이션", "keywords": ["Energy SW", "담당업무", "로테이션", "Job Rotation", "직무순환", "인사이동"]}</output>
+</example>
+<example>
+<question>jack jang/장승혁 프로가 누구야?</question>
+<output>{"core": "jack jang 장승혁", "keywords": ["장승혁", "Jack Jang", "jack.jang", "jackjang", "Seunghyuk Jang", "seunghyuk.jang"]}</output>
 </example>"""
 
-_INSTRUCTIONS = """사내 기술 위키/Confluence 검색에 쓸 키워드를 뽑는 도구다.
+_INSTRUCTIONS = """사내 기술 위키/Confluence 검색에 쓸 검색어를 만드는 도구다.
 <context>가 있으면 그 맥락에 맞춰 <question> 속 모호한 단어의 의미부터 확정해라.
-그다음 질문의 핵심 검색 대상(기술 용어/약어/시스템·제품·프로젝트명/인물 이름 등
-무엇이든)이 실제 문서에서 어떻게 다르게 표기될 수 있는지 판단해서 키워드
-후보를 3~8개 만들어라. 고려할 표기 변형 축(대상 성격에 맞는 것만 적용):
-- 언어: 한글 표현과 영어 표현을 둘 다
-- 약어↔풀네임: 약어만 있으면 풀네임을, 풀네임만 있으면 약어를 추정
-- 표기 규칙: 띄어쓰기 유무, 대소문자, 구분자(마침표/하이픈/붙여쓰기) — 사내
-  문서·이메일 계정은 같은 대상을 여러 방식으로 섞어 표기함
-- 도메인 모호성: 여러 분야에 걸쳐 쓰이는 용어는 확신 없으면 무리해서 확장하지
-  마라 — 원본 표현은 확장이 틀리더라도 항상 keywords에 남겨야 한다
-- 인물 이름: 로마자 표기·사내 이메일 표기(소문자.마침표)·붙여쓰기 소문자는
-  적극 추가하되, "프로"/"님"/"씨" 같은 범용 호칭 접미사는 절대 붙이지 마라 —
-  거의 모든 사람 이름에 똑같이 붙는 표현이라 특정 인물을 구분하는 데 전혀
-  도움이 안 되고, 그 호칭이 잔뜩 들어간 다른 사람 관련 문서(주간업무 인원
-  명단 등)만 검색 상위로 끌어올려 정작 찾는 사람의 문서를 밀어낸다. 직함
-  (부장/팀장 등)도 실제 직함을 모르면 추측해서 붙이지 마라 — 틀린 추측은
-  물론 정확한 추측이어도 검증할 방법이 없다
-아래 <example>들을 참고해라. 출력은 반드시 {"keywords": [...]} JSON 하나만,
-다른 설명·코드펜스는 절대 붙이지 마라."""
+
+출력은 두 필드다:
+- "core": 원본 질문에서 조사/구두점/구분자("/" 등)·"프로"/"님"/"씨" 같은 범용
+  호칭·"뭐야"/"누구야"/"찾아줘" 같은 의문형 어미와 요청 동사만 문법적으로
+  제거한, 최대한 원문에 가까운 검색어. 동의어로 바꾸거나 언어를 번역하거나
+  의미를 확장하지 마라 — 오직 "질문이 아니라 검색어라면 어떻게 썼을까"만
+  적용해라(대화 맥락으로 모호한 대상을 확정하는 것은 예외적으로 허용). 이
+  필드는 검색 정확도의 기준선(anchor)으로 쓰이므로 잘못된 추측이 섞이면 안
+  된다.
+- "keywords": "core"를 포함해서, 질문의 핵심 검색 대상(기술 용어/약어/시스템·
+  제품·프로젝트명/인물 이름 등 무엇이든)이 실제 문서에서 어떻게 다르게
+  표기될 수 있는지 판단한 동의어/변형 후보 3~8개. 고려할 축(대상 성격에 맞는
+  것만 적용):
+  - 언어: 한글 표현과 영어 표현을 둘 다
+  - 약어↔풀네임: 약어만 있으면 풀네임을, 풀네임만 있으면 약어를 추정
+  - 표기 규칙: 띄어쓰기 유무, 대소문자, 구분자(마침표/하이픈/붙여쓰기) — 사내
+    문서·이메일 계정은 같은 대상을 여러 방식으로 섞어 표기함
+  - 도메인 모호성: 여러 분야에 걸쳐 쓰이는 용어는 확신 없으면 무리해서
+    확장하지 마라 — 원본 표현은 확장이 틀리더라도 항상 keywords에 남겨야 한다
+  - 인물 이름: 로마자 표기·사내 이메일 표기(소문자.마침표)·붙여쓰기 소문자는
+    적극 추가하되, "프로"/"님"/"씨" 같은 범용 호칭 접미사는 keywords에도
+    붙이지 마라 — 거의 모든 사람 이름에 똑같이 붙는 표현이라 특정 인물을
+    구분하는 데 전혀 도움이 안 되고, 그 호칭이 잔뜩 들어간 다른 사람 관련
+    문서(주간업무 인원 명단 등)만 검색 상위로 끌어올려 정작 찾는 사람의
+    문서를 밀어낸다. 직함(부장/팀장 등)도 실제 직함을 모르면 추측해서
+    붙이지 마라 — 틀린 추측은 물론 정확한 추측이어도 검증할 방법이 없다
+아래 <example>들을 참고해라. 출력은 반드시 {"core": "...", "keywords": [...]}
+JSON 하나만, 다른 설명·코드펜스는 절대 붙이지 마라."""
 
 
 def _expand_search_query(question, history=None, timeout=30):
+    """(core, keywords_str) 튜플을 반환한다. core는 문법적 잡음만 걷어낸 원본 검색어
+    (build_context()의 1차/신뢰 검색어로 사용), keywords_str은 동의어/표기 변형까지
+    포함한 보완 검색어(2차/확장 검색에 사용). claude -p 실패/타임아웃/미설치 시
+    (question, question)으로 폴백 — 검색 자체를 막으면 안 되므로 조용히 원문 그대로
+    진행한다."""
     if not _claude_cli_available():
-        return question
+        return question, question
     context_block = ""
     if history and len(history) > 1:
         recent = history[:-1][-4:]  # 최신 질문 이전 최근 2턴 정도
@@ -168,9 +201,8 @@ def _expand_search_query(question, history=None, timeout=30):
         f"{context_block}"
         f"<question>{question}</question>"
     )
-    # 정제된 키워드가 나왔으면 그것만 검색어로 쓴다(원문에 붙이지 않음) — Rovo Search는
-    # 짧은 키워드 질의에서 훨씬 정확한데(기존에 검증됨), 잡음 섞인 원문 문장을 그대로
-    # 이어붙이면 그 원칙과 반대로 가서 관련도가 흔들린다(실측: "Energy SW"를 물어본
-    # 대화의 후속 질문에 무관한 문장이 잔뜩 섞이자 엉뚱한 파트의 R&R 문서가 나온 사례).
-    extra = _expand_search_query_llm_call(prompt, timeout)
-    return extra if extra else question
+    result = _expand_search_query_llm_call(prompt, timeout)
+    if not result:
+        return question, question
+    core, keywords_str = result
+    return core, keywords_str

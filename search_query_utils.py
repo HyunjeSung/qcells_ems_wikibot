@@ -71,7 +71,15 @@ def _tech_query(query: str) -> str:
 
 def _extract_terms(query: str) -> list:
     """키워드 매치 채점용 용어 추출. 영문·숫자뿐 아니라 한글 기술 용어도 함께 뽑는다
-    (순수 한글 질문에서 키워드 보너스가 0점이 되는 것을 방지)."""
+    (순수 한글 질문에서 키워드 보너스가 0점이 되는 것을 방지).
+
+    "/"는 먼저 공백으로 바꾼다 — _TECH_TERMS가 "."/"-"와 함께 "/"도 토큰 내부 문자로
+    허용해서("Q.OMMAND"/"GEM-NET-ID" 같은 기술 용어를 살리려는 의도), "Jack Jang/장승혁"
+    처럼 사용자가 이름 표기를 "/"로 나열한 질문에서 "jang/"이 슬래시가 붙은 채로 한
+    토큰이 되어 Rovo Search에서 정상적인 "Jang" 매치를 방해하는 게 실측됨(2026-09-17,
+    "jack jang/장승혁 프로가 누구야?" 케이스 — 슬래시 없는 "장승혁 프로가 누구야"는
+    같은 파이프라인에서 정상 동작했는데 이 케이스만 실패해서 추적함)."""
+    query = query.replace("/", " ")
     ascii_terms = _TECH_TERMS.findall(query)
     korean_terms = _KOREAN_TERMS.findall(_clean_query(query))
     return ascii_terms + korean_terms

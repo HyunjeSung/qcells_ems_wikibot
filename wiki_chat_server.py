@@ -35,7 +35,7 @@ from query_expansion import _expand_search_query  # claude -p 검색어 확장 �
 from confluence_to_text import render as render_storage_html
 from bs4 import BeautifulSoup
 from atlassian_mcp_client import (
-    rovo_search, _EMPTY_BODY_NOTE, _confluence_space_of, CONFLUENCE_PERSONAL_SPACE_OWNERS,
+    rovo_search, search_by_creator, _EMPTY_BODY_NOTE, _confluence_space_of, CONFLUENCE_PERSONAL_SPACE_OWNERS,
 )
 import wiki_chat_history as chat_history
 
@@ -142,6 +142,13 @@ Confluence 문서를 배경지식으로 삼아 답하는 개발 어시스턴트�
   다뤄온 업무"로 제시하세요 — 예: "OO님 개인 스페이스에 Generator/HUB 연동 관련 기술노트가
   있어 해당 분야 업무를 맡고 있는 것으로 보입니다." 인물의 직책/소속까지는 이 노트만으로
   확정할 수 없으면 그 점은 솔직히 밝히되, 노트 자체의 존재와 주제는 답변에 반드시 활용하세요
+- 출처 표시에 "~~님이 작성한 문서(짧은 발췌)"라고 적혀 있으면, Confluence 메타데이터(작성자)로
+  찾아낸 그 사람의 다른 문서들입니다 — 발췌가 짧아서 그 사람 이름이 본문에 안 보여도, 그
+  문서의 제목과 다루는 주제 자체가 "이 사람이 이런 업무/프로젝트에 관여했다"는 근거입니다
+  (예: 예산 품의서에 그 사람이 결재자로 있거나, 회의록의 작성자로 되어 있는 식). 인물의
+  역할/이력을 묻는 질문에는 이런 문서들의 제목과 주제를 적극 종합해서 답에 반영하세요 —
+  본문 발췌가 짧다는 이유로 무시하거나 "본문에 이름이 없어 확인 불가"라고 하지 마세요.
+  여러 개가 있으면 시기별/주제별로 묶어서 그 사람이 다뤄온 업무 범위를 설명하는 데 쓰세요
 - 참고 자료 문서 전체를 요약/나열하지 말고, 사용자 질문에 답하는 데 필요한 내용만 골라서 답하세요.
   특히 참고 자료가 PRD/FRD처럼 문서 전체를 다루는 경우, Role별 권한표(예: "Qcells Admin",
   "Fleet Partner Admin" 같은 웹 콘솔 접근 권한)나 웹/클라우드 콘솔 메뉴 이동 경로(예: "GNB 검색 →
@@ -676,10 +683,20 @@ def _build_search_query(history):
     return last
 
 
-# 문법상으로만 살아남는 접속/의문 단어들 — _extract_terms는 "로직"/"커미셔닝" 같은
-# 내용어를 위해 한글 2글자+를 다 뽑다 보니 이런 것도 같이 딸려온다("TOU 관련해서
-# 로직에 대해 설명한 페이지 있니?" -> tech_query가 ASCII만 남겨 "TOU"로 뭉개버리는
-# 문제는 해결됐지만, 이번엔 "관련/대해/설명한/있니" 같은 노이즈가 새로 낌).
+# 문법상으로만 살아남는 접속/의문 단어들. 원래는 _extract_terms의 정규식 추출
+# 결과에서 "로직"/"커미셔닝" 같은 내용어를 위해 한글 2글자+를 다 뽑다 보니 같이
+# 딸려오는 노이즈("TOU 관련해서 로직에 대해 설명한 페이지 있니?" -> "관련/대해/
+# 설명한/있니")를 거르는 용도였다.
+#
+# 2026-09-17부터 역할이 바뀌었다: build_context()의 1차(원본) 검색어는 이제
+# _expand_search_query()의 LLM "core" 필드가 만든다(문법적 잡음을 일반적으로
+# 제거 — 새 잡음 패턴이 나올 때마다 여기 단어를 추가하는 방식에서 탈피하려는
+# 목적, 사용자 지적: "이거 하나하나 룰베이스로 하면 끝도 없어"). 이 집합은 이제
+# 그 LLM 정제를 대체하지 않고, **이미 실제 사고를 낸 적 있는 단어에 한해서만**
+# LLM이 어쩌다 놓쳤을 때의 값싼 최후 안전망 역할만 한다(claude -p 샘플링
+# 비결정성 — 같은 질문도 실행마다 core 정제 정도가 살짝 다를 수 있음, 실측
+# 확인). 새 단어를 습관적으로 추가하지 말고, 반복 재현되는 실패만 여기 담을 것
+# — 일반적인 케이스는 query_expansion.py의 <instructions>를 고쳐서 대응해야 한다.
 _GENERIC_KO_WORDS = {
     "관련", "대해", "대한", "있니", "있나요", "있어", "있음", "무엇",
     "어떤", "설명", "설명한", "설명해", "부분", "내용", "관해서", "관해",
@@ -693,6 +710,12 @@ _GENERIC_KO_WORDS = {
     # 상위 5개는 실제로 그가 등장하는 특허/자산/휴가 문서 — "gem net id"류 도메인
     # 이탈과는 다른, "이름을 흐리는 초고빈도 부가어" 축의 새로운 실패 패턴).
     "프로", "님", "씨",
+    # "누구야"류 의문사(2026-09-17 추가). `_KO_STOP`(search_query_utils.py)은 "뭐야"는
+    # 걸러내지만 "누구야"는 안 걸러내서, "장승혁이 누구야" 같은 흔한 인물 질문에서
+    # "누구야"가 그대로 검색어에 남는다. 4글자라 person_name_candidates(한글 2~4자
+    # 정규식)에도 false-positive로 걸려서 "누구야"를 인물 이름으로 오인해 작성자 검색
+    # 앵커 후보로 취급할 뻔한 것까지 실측으로 발견 — 이름 후보 오염 방지 차원에서도 필요.
+    "누구야", "누구", "누군지", "누구인지",
 }
 
 
@@ -746,9 +769,26 @@ def build_context(question, history=None):
     # 이 함수는 build_context 로컬 변수만 다루고, 대화 이력/최종 답변 프롬프트에 쓰이는
     # 원문은 history 쪽에 그대로 남아있다).
     question = _apply_person_aliases(question)
-    expanded_question = _expand_search_query(question, history)
-    original_terms = [t for t in _extract_terms(question) if t not in _GENERIC_KO_WORDS]
-    original_query = " ".join(original_terms) if original_terms else question
+    # 원본(1차) 검색어 정제는 더 이상 정규식 불용어 목록으로 하지 않는다(2026-09-17,
+    # 사용자 지적: "이거 하나하나 룰베이스로 하면 끝도 없어, 좋은 방법 없니?" — 프로/
+    # 님/씨/누구야/"/" 등을 정규식으로 하나씩 걸러내다 보니 새 케이스가 나올 때마다
+    # 또 패치해야 했음). 대신 이미 쓰고 있던 검색어 확장 LLM 호출(claude -p, 1회만
+    # 호출 — 지연 추가 없음)이 "core"(문법적 잡음만 제거한 신뢰 가능한 원본 검색어)와
+    # "keywords"(동의어/표기 변형 포함 보완 검색어)를 한 번에 뽑게 구조를 바꿨다
+    # (query_expansion.py의 _INSTRUCTIONS/_FEWSHOT_EXAMPLES 참고). claude -p 실패 시
+    # (question, question)으로 폴백하므로 아래 로직은 항상 안전하게 동작한다.
+    original_query, expanded_keywords = _expand_search_query(question, history)
+    # claude -p는 같은 지시에도 매번 똑같이 순종하지 않는다(샘플링 비결정성, 위
+    # _expand_search_query_llm_call 주석 참고) — 실측: "장승혁 프로가 누구야"를 여러 번
+    # 물으면 대부분 core="장승혁"으로 깨끗하게 나오지만, 가끔 "장승혁 프로가 누구야"를
+    # 거의 그대로 core에 남기는 경우가 나옴(3회 연속 성공 후 다른 실행에서 1회 재현).
+    # 이 최소 집합(_GENERIC_KO_WORDS)은 LLM 정제 규칙을 대체하는 게 아니라, 이미
+    # 실제로 사고를 낸 적 있는 단어들만 담은 값싼 안전망이다 — 카테고리를 넓혀가며
+    # 계속 키우는 게 아니라, LLM이 어쩌다 놓쳤을 때 최후 방어선 역할만 한다.
+    original_query = " ".join(
+        t for t in original_query.split() if t not in _GENERIC_KO_WORDS
+    ) or original_query
+    original_terms = original_query.split()
 
     # 원본 질의를 먼저 검색해 최우선 후보로 삼고, 확장 질의 결과로 보완한다(원본 우선 +
     # 확장 보완 병합) — "extra_terms로 확장 질의 문자열 뒤에 원본 키워드를 붙이는" 이전
@@ -763,15 +803,46 @@ def build_context(question, history=None):
     live_pages = rovo_search(original_query, limit=3)
     using_rovo = bool(live_pages)
 
-    if using_rovo and expanded_question.strip() != original_query.strip():
+    if using_rovo and expanded_keywords.strip() != original_query.strip():
         expanded_pages = rovo_search(
-            _rovo_search_query(expanded_question, extra_terms=original_terms), limit=3, two_hop=False
+            _rovo_search_query(expanded_keywords, extra_terms=original_terms), limit=3, two_hop=False
         )
         seen_urls = {p["url"] for p in live_pages}
         for p in expanded_pages:
             if p["url"] not in seen_urls:
                 live_pages.append(p)
                 seen_urls.add(p["url"])
+
+    # 인물 질문 보강: 후보 문서 중 제목에 그 인물의 한글 이름이 그대로 들어있는 문서를
+    # "본인이 작성한 문서"로 보고(이 회사 문서 관행 — 실측: "(장승혁) 모니터링 시스템...",
+    # "(장승혁, 김다빈) Energy Flow..."), 그 작성자 계정(author_id)으로 Confluence를
+    # 통째로 재검색해서 원본/확장 텍스트 검색이 놓친 문서까지 보강한다. 사용자가 직접
+    # 지적(2026-09-17): "confluence에서 작성자 이름에서 못찾니?" — Rovo Search는 본문
+    # 텍스트 매칭 위주라 예산 품의서/회의록처럼 이름이 스치듯 한두 번만 나오는(작성자
+    # 본인은 자기 이름을 문서 안에 잘 안 씀) 문서를 놓치는데, 실제로 Confluence
+    # 메타데이터로 "장승혁" 계정을 찾아 재검색하니 FCAS 정리/JWG 미팅록/연구소 소개
+    # 문서 등 텍스트 검색으론 전혀 안 걸리던 문서가 대거 나옴(실측 확인).
+    person_name_candidates = [t for t in original_terms if re.fullmatch(r"[가-힣]{2,4}", t)]
+    if person_name_candidates:
+        anchor_author_id = next(
+            (p.get("author_id") for p in live_pages
+             if p.get("author_id") and any(n in p.get("title", "") for n in person_name_candidates)),
+            None,
+        )
+        if anchor_author_id:
+            author_pages, author_display_name = search_by_creator(anchor_author_id, limit=10)
+            seen_urls = {p["url"] for p in live_pages}
+            added = 0
+            for p in author_pages:
+                if p["url"] in seen_urls:
+                    continue
+                if author_display_name:
+                    p["author_display_name"] = author_display_name
+                live_pages.append(p)
+                seen_urls.add(p["url"])
+                added += 1
+                if added >= 6:  # 발췌만 쓰지만 소스 목록이 너무 길어지지 않게 상한
+                    break
 
     # 본문이 진짜로 비어있는 페이지(다이어그램/엑셀 첨부파일만 있음)는 원본 첨부파일을
     # 직접 파싱해서 보완한다(_fetch_attachment_text 참고, 사용자 확정 2026-08-12).
@@ -804,7 +875,7 @@ def build_context(question, history=None):
     if not using_rovo:
         # 스페이스를 7개로 넓힌 뒤로 동일 키워드 매치 건수가 훨씬 많아져서(예: "TOU" 20+건)
         # limit=3이면 진짜 관련 문서가 순위 밖으로 밀릴 위험이 커짐 -> 여유 있게 5개
-        live_pages = search_confluence_live(expanded_question, limit=5)
+        live_pages = search_confluence_live(expanded_keywords, limit=5)
 
     parts = []
     sources = []
@@ -813,7 +884,15 @@ def build_context(question, history=None):
         kind = "Jira" if p.get("type") == "issue" else "Confluence"
         label_type = "jira" if p.get("type") == "issue" else "confluence"
         owner = CONFLUENCE_PERSONAL_SPACE_OWNERS.get(_confluence_space_of(p.get("url")))
-        owner_note = f", {owner}님의 개인 Confluence 스페이스 문서" if owner else ""
+        author_name = p.get("author_display_name")
+        if owner:
+            owner_note = f", {owner}님의 개인 Confluence 스페이스 문서"
+        elif author_name:
+            # search_by_creator()로 보강된 문서 — 발췌만 있어 본문이 짧을 수 있으니
+            # 모델이 "이 사람이 작성한 문서"라는 맥락을 놓치지 않게 명시(2026-09-17).
+            owner_note = f", {author_name}님이 작성한 문서(짧은 발췌)"
+        else:
+            owner_note = ""
         parts.append(f"[출처: {kind}(live, Rovo Search{owner_note}) - {p['title']} | URL: {p['url']}]\n{p['text']}"
                      if using_rovo else f"[출처: Confluence(live{owner_note}) - {p['title']} | URL: {p['url']}]\n{p['text']}")
         sources.append({"type": label_type, "label": p["title"], "url": p["url"]})

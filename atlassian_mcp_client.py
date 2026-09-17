@@ -108,11 +108,18 @@ def _extract_referenced_page_links(text):
 
 
 def _fetch_confluence_page_by_id(token, session_id, page_id, max_chars=None):
-    """ARI 파싱 없이 page_id로 직접 getConfluencePage 호출. (title, body) 반환,
+    """ARI 파싱 없이 page_id로 직접 getConfluencePage 호출. (title, author_id, body) 반환,
     실패/본문없음 시 body는 None. max_chars 생략 시 MAX_PAGE_CHARS(검색 결과 스니펫
     기본 상한) 적용 — ToC 매핑 페이지처럼 전체를 다 읽어야 하는 특수 페이지는
     호출부에서 더 큰 값을 넘긴다(실측 버그: 기본 8000자 상한에 걸려 ToC 후반부
-    섹션(17.1 "CAN Map" 등)이 통째로 안 읽혀서 _toc_entries가 못 찾음)."""
+    섹션(17.1 "CAN Map" 등)이 통째로 안 읽혀서 _toc_entries가 못 찾음).
+
+    author_id는 페이지 최초 작성자의 accountId(payload의 "authorId" 필드, 별도 API
+    호출 없이 getConfluencePage 응답에 이미 포함되어 있음) — search_by_creator()로
+    "이 사람이 작성한 다른 문서"를 찾을 때 쓴다(2026-09-17, 사용자 지적: "confluence에서
+    작성자 이름에서 못찾니?" — Rovo Search는 본문 텍스트 매칭 위주라 이름이 스치듯
+    한두 번만 언급되는 문서(예산 품의서 등)를 놓치는데, 작성자 메타데이터로 찾으면
+    그 사람이 실제로 만든 문서를 빠짐없이 찾을 수 있다)."""
     result = _call_tool_in_session(token, session_id, "getConfluencePage", {
         "cloudId": SITE_URL,
         "pageId": page_id,
@@ -120,16 +127,17 @@ def _fetch_confluence_page_by_id(token, session_id, page_id, max_chars=None):
     })
     payload = _tool_text_payload(result)
     if not isinstance(payload, dict):
-        return None, None
+        return None, None, None
     title = payload.get("title")
+    author_id = payload.get("authorId")
     body = payload.get("body")
     if isinstance(body, dict):
         body = body.get("value") or body.get("markdown")
     if not body or not isinstance(body, str):
-        return title, None
+        return title, author_id, None
     body = _repair_markdown_tables(_clean_confluence_markup(body))
     cap = MAX_PAGE_CHARS if max_chars is None else max_chars
-    return title, body[:cap]
+    return title, author_id, body[:cap]
 
 
 # 사용자가 직접 만든 "EMS Project Encyclopedia ToC ↔ Confluence 소스" 매핑 페이지(개인
@@ -151,7 +159,7 @@ def _toc_entries(token, session_id):
     if _toc_cache["entries"] is not None and now - _toc_cache["ts"] < _TOC_CACHE_TTL:
         return _toc_cache["entries"]
     try:
-        _, body = _fetch_confluence_page_by_id(token, session_id, _TOC_PAGE_ID, max_chars=200000)
+        _, _, body = _fetch_confluence_page_by_id(token, session_id, _TOC_PAGE_ID, max_chars=200000)
     except Exception:
         body = None
     entries = []
@@ -433,13 +441,13 @@ def _repair_markdown_tables(text):
 
 def _fetch_full_confluence_page(token, session_id, ari_id):
     """search 결과의 짧은 스니펫 대신 페이지 전체 본문(markdown)을 가져온다.
-    Jira issue나 ARI 파싱 실패 시 None(호출부에서 스니펫으로 폴백)."""
+    Jira issue나 ARI 파싱 실패 시 (None, None)(호출부에서 스니펫으로 폴백)."""
     m = _ARI_CONFLUENCE_PAGE.match(ari_id or "")
     if not m:
-        return None
+        return None, None
     _, page_id = m.group(1), m.group(2)
-    _, body = _fetch_confluence_page_by_id(token, session_id, page_id)
-    return body
+    _, author_id, body = _fetch_confluence_page_by_id(token, session_id, page_id)
+    return author_id, body
 
 
 def rovo_search(query, limit=5, fetch_full_pages=True, two_hop=True, timeout=20):
@@ -502,9 +510,10 @@ def rovo_search(query, limit=5, fetch_full_pages=True, two_hop=True, timeout=20)
     items = []
     for r in results:
         text = r.get("text", "")
+        author_id = None
         if fetch_full_pages and r.get("type") == "page":
             try:
-                full_text = _fetch_full_confluence_page(token, session_id, r.get("id", ""))
+                author_id, full_text = _fetch_full_confluence_page(token, session_id, r.get("id", ""))
                 if full_text:
                     text = full_text
             except Exception as e:
@@ -515,6 +524,7 @@ def rovo_search(query, limit=5, fetch_full_pages=True, two_hop=True, timeout=20)
             "url": r.get("url", ""),
             "text": text,
             "type": r.get("type", "page"),
+            "author_id": author_id,
         })
 
     # 2-hop: 1차 결과가 놓친 문서를 최대 MAX_LINKED_FOLLOW개까지 보완한다(사용자 확정,
@@ -538,7 +548,7 @@ def rovo_search(query, limit=5, fetch_full_pages=True, two_hop=True, timeout=20)
             if not pid or pid in existing_ids:
                 continue
             try:
-                real_title, body = _fetch_confluence_page_by_id(token, session_id, pid)
+                real_title, author_id, body = _fetch_confluence_page_by_id(token, session_id, pid)
             except Exception as e:
                 import sys
                 print(f"⚠️  ToC 연관 문서 조회 실패({toc_title}): {e}", file=sys.stderr)
@@ -550,6 +560,7 @@ def rovo_search(query, limit=5, fetch_full_pages=True, two_hop=True, timeout=20)
                 "url": f"/wiki/pages/viewpage.action?pageId={pid}",
                 "text": body or _EMPTY_BODY_NOTE,
                 "type": "page",
+                "author_id": author_id,
             })
             existing_ids.add(pid)
             existing_titles.add(real_title or toc_title)
@@ -564,7 +575,7 @@ def rovo_search(query, limit=5, fetch_full_pages=True, two_hop=True, timeout=20)
                         referenced[pid] = link_text
             for pid, link_text in list(referenced.items())[:remaining]:
                 try:
-                    real_title, body = _fetch_confluence_page_by_id(token, session_id, pid)
+                    real_title, author_id, body = _fetch_confluence_page_by_id(token, session_id, pid)
                 except Exception as e:
                     import sys
                     print(f"⚠️  연관 문서 후속 조회 실패({link_text}): {e}", file=sys.stderr)
@@ -576,9 +587,68 @@ def rovo_search(query, limit=5, fetch_full_pages=True, two_hop=True, timeout=20)
                     "url": f"/wiki/pages/viewpage.action?pageId={pid}",
                     "text": body or _EMPTY_BODY_NOTE,
                     "type": "page",
+                    "author_id": author_id,
                 })
                 existing_ids.add(pid)
     return items
+
+
+# CQL의 creator 필드는 "~"(fuzzy) 연산자를 지원하지 않고 정확한 accountId만 받는다
+# (실측: `creator ~ "장승혁"` -> 400 Bad Request "Operator '~' is not supported for
+# field 'creator'"). 그래서 이름으로 바로 검색할 수 없고, 이미 확보한 accountId로만
+# 쓸 수 있다 — build_context()가 rovo_search 결과 중 제목에 그 이름이 그대로 들어있는
+# 문서의 author_id를 "본인 계정"으로 채택해서 넘겨준다.
+def search_by_creator(author_id, limit=10, timeout=20):
+    """특정 인물(author_id)이 작성(creator)한 Confluence 페이지를 CQL로 전부 찾는다.
+    Rovo Search(`search` 도구)는 본문 텍스트 매칭 위주라, 이름이 스치듯 한두 번만
+    언급되는 문서(예산 품의서, 회의록 등 — 작성자 본인은 자기 이름을 문서 안에 잘 안
+    씀)를 놓친다. 반면 Confluence는 페이지마다 "누가 만들었나" 메타데이터를 갖고
+    있어서, 그 계정으로 검색하면 텍스트 매칭으로는 못 찾는 문서까지 빠짐없이 찾을 수
+    있다(실측: "장승혁" 계정으로 전체 검색하니 예산 품의서/JWG 미팅록/연구소 소개
+    문서 등 50건 — 사용자가 "confluence에서 작성자 이름에서 못찾니?"라고 직접 지적,
+    2026-09-17).
+
+    getConfluencePage 전체 fetch 대신 CQL 검색 결과의 excerpt(짧은 발췌)만 쓴다 —
+    "이 사람이 뭘 다뤘는지"를 넓게 훑는 용도라 문서 개수가 많을 수 있는데, 개수만큼
+    전체 본문을 fetch하면 컨텍스트가 너무 커지고 지연도 늘어난다. 스페이스는
+    CONFLUENCE_TEAM_SPACES로 제한해서 같은 테넌트의 무관한 다른 제품 문서가 섞이는
+    걸 막는다(개인 스페이스는 accountId 기반이라 이 함수의 대상이 아님).
+    (문서 목록, 표시 이름) 튜플을 반환 — 실패 시 ([], None)."""
+    try:
+        token = _get_access_token()
+        session_id = _start_session(token)
+        # ORDER BY lastmodified DESC는 최근 수정 문서(입사자 매뉴얼 갱신 등 인물과 무관한
+        # 관리성 편집)를 앞으로 밀어내 실측상 오히려 관련도가 떨어졌다 — 기본 정렬(관련도
+        # 순으로 추정)이 FCAS/연구소/CW40 개인주간보고 등 인물을 잘 설명하는 문서를 훨씬
+        # 앞쪽에 배치함(2026-09-17 실측 비교).
+        space_clause = " OR ".join(f'space = "{s}"' for s in CONFLUENCE_TEAM_SPACES)
+        cql = f'creator = "{author_id}" AND type = page AND ({space_clause})'
+        result = _call_tool_in_session(token, session_id, "searchConfluenceUsingCql", {
+            "cloudId": SITE_URL,
+            "cql": cql,
+            "limit": limit,
+        })
+    except Exception as e:
+        import sys
+        print(f"⚠️  작성자 기반 Confluence 검색 실패: {e}", file=sys.stderr)
+        return [], None
+
+    payload = _tool_text_payload(result)
+    raw_results = payload.get("results", []) if isinstance(payload, dict) else []
+    items = []
+    author_name = None
+    for r in raw_results:
+        created_by = r.get("content", {}).get("history", {}).get("createdBy", {}) or {}
+        author_name = author_name or created_by.get("displayName")
+        webui = r.get("content", {}).get("_links", {}).get("webui", "")
+        items.append({
+            "title": r.get("title", "(제목 없음)"),
+            "url": f"https://{SITE_URL}/wiki{webui}" if webui else "",
+            "text": r.get("excerpt", ""),
+            "type": "page",
+            "author_id": author_id,
+        })
+    return items, author_name
 
 
 if __name__ == "__main__":
