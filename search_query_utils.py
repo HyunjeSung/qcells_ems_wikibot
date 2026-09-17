@@ -51,7 +51,15 @@ def _clean_query(query: str) -> str:
     q = _KO_STOP.sub(' ', query)
     q = _KO_PARTICLE.sub(' ', q)
     q = re.sub(r'\s+', ' ', q).strip()
-    return q if len(q) > 3 else query
+    # 정제 결과가 너무 짧으면(필터·조사 제거로 알맹이가 거의 안 남았으면) 정제를
+    # 못 믿고 원문을 쓴다. 예전엔 이 기준이 "> 3"이라 정확히 3음절인 한글 이름
+    # ("장승혁", "홍길동" 등 가장 흔한 한국 이름 길이)이 조사·의문어 제거 후 딱 그
+    # 이름만 남으면 "너무 짧다"고 오판해서 원문("장승혁이 뭐야")을 그대로 검색어로
+    # 써버렸다 — 조사가 안 떨어진 "장승혁이"가 Rovo Search에서 0건이 되어 원본 질의
+    # 검색 자체가 실패하고, build_context가 이를 "Rovo 응답 없음"으로 오인해 더 나은
+    # 결과를 주는 확장 질의 Rovo 검색까지 건너뛰고 레거시 CQL 폴백으로 빠지는 연쇄
+    # 실패가 실측됨(2026-09-17, "장승혁이 뭐야" 케이스). 2글자 이상이면 신뢰하도록 완화.
+    return q if len(q) >= 2 else query
 
 
 def _tech_query(query: str) -> str:
