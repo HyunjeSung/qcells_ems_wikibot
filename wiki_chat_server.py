@@ -35,7 +35,8 @@ from query_expansion import _expand_search_query  # claude -p 검색어 확장 �
 from confluence_to_text import render as render_storage_html
 from bs4 import BeautifulSoup
 from atlassian_mcp_client import (
-    rovo_search, search_by_creator, _EMPTY_BODY_NOTE, _confluence_space_of, CONFLUENCE_PERSONAL_SPACE_OWNERS,
+    rovo_search, search_by_creator, find_author_id_by_title,
+    _EMPTY_BODY_NOTE, _confluence_space_of, CONFLUENCE_PERSONAL_SPACE_OWNERS,
 )
 import wiki_chat_history as chat_history
 
@@ -813,24 +814,43 @@ def build_context(question, history=None):
                 live_pages.append(p)
                 seen_urls.add(p["url"])
 
-    # 인물 질문 보강: 후보 문서 중 제목에 그 인물의 한글 이름이 그대로 들어있는 문서를
-    # "본인이 작성한 문서"로 보고(이 회사 문서 관행 — 실측: "(장승혁) 모니터링 시스템...",
-    # "(장승혁, 김다빈) Energy Flow..."), 그 작성자 계정(author_id)으로 Confluence를
-    # 통째로 재검색해서 원본/확장 텍스트 검색이 놓친 문서까지 보강한다. 사용자가 직접
-    # 지적(2026-09-17): "confluence에서 작성자 이름에서 못찾니?" — Rovo Search는 본문
-    # 텍스트 매칭 위주라 예산 품의서/회의록처럼 이름이 스치듯 한두 번만 나오는(작성자
-    # 본인은 자기 이름을 문서 안에 잘 안 씀) 문서를 놓치는데, 실제로 Confluence
-    # 메타데이터로 "장승혁" 계정을 찾아 재검색하니 FCAS 정리/JWG 미팅록/연구소 소개
-    # 문서 등 텍스트 검색으론 전혀 안 걸리던 문서가 대거 나옴(실측 확인).
-    person_name_candidates = [t for t in original_terms if re.fullmatch(r"[가-힣]{2,4}", t)]
+    # 인물 질문 보강: 질문에 한글 이름이 있으면 그 이름이 제목에 들어간 Confluence
+    # 문서를 CQL title ~ 검색으로 직접, 결정적으로 찾아 작성자 계정(author_id)을
+    # 얻고, 그 계정으로 Confluence를 통째로 재검색해서 원본/확장 텍스트 검색이
+    # 놓친 문서까지 보강한다. 사용자가 직접 지적(2026-09-17): "confluence에서
+    # 작성자 이름에서 못찾니?" — Rovo Search는 본문 텍스트 매칭 위주라 예산
+    # 품의서/회의록처럼 이름이 스치듯 한두 번만 나오는(작성자 본인은 자기 이름을
+    # 문서 안에 잘 안 씀) 문서를 놓치는데, 실제로 Confluence 메타데이터로 "장승혁"
+    # 계정을 찾아 재검색하니 FCAS 정리/JWG 미팅록/연구소 소개 문서 등 텍스트
+    # 검색으론 전혀 안 걸리던 문서가 대거 나옴(실측 확인).
+    #
+    # 처음엔 rovo_search 결과(live_pages) 중 제목에 이름이 들어간 문서를 찾는
+    # 방식이었는데, "jack jang/장승혁 프로가 누구야?"처럼 흔한 영단어("jack"/
+    # "jang")가 검색어에 섞이면 Rovo의 불투명한 랭킹이 "(장승혁)" 문서 자체를
+    # 상위 결과에서 아예 빼버려서 anchor를 못 찾는 재발이 실측됨(사용자가 3번
+    # 연속 재현시킴, 2026-09-17). find_author_id_by_title()은 CQL title ~ 연산자로
+    # Rovo 랭킹을 거치지 않고 직접 찾으므로 이 문제에서 자유롭다.
+    #
+    # 후보를 core(원본 질의)뿐 아니라 expanded_keywords(확장 질의)에서도 뽑는다 —
+    # "Jack Jang으로 작성된 문서를 찾아줘"처럼 질문에 한글 이름이 아예 없는 경우,
+    # _expand_search_query가 이미 "장승혁"을 keywords에 추론해서 넣어주므로
+    # (query_expansion.py의 인물 표기 축) 그걸 그대로 활용한다 — 실측: 이 질문의
+    # core는 "Jack Jang 작성 문서"(한글 이름 없음)였지만 keywords엔 "장승혁"이
+    # 포함돼 있었음(2026-09-17, 사용자가 "Jack Jang으로 작성된 문서를 찾아줘"로
+    # 재현시켜 발견).
+    person_name_candidates = [
+        t for t in original_terms + expanded_keywords.split()
+        if re.fullmatch(r"[가-힣]{2,4}", t)
+    ]
     if person_name_candidates:
-        anchor_author_id = next(
-            (p.get("author_id") for p in live_pages
-             if p.get("author_id") and any(n in p.get("title", "") for n in person_name_candidates)),
-            None,
-        )
+        anchor_author_id = anchor_author_name = None
+        for name in person_name_candidates:
+            anchor_author_id, anchor_author_name = find_author_id_by_title(name)
+            if anchor_author_id:
+                break
         if anchor_author_id:
             author_pages, author_display_name = search_by_creator(anchor_author_id, limit=10)
+            author_display_name = author_display_name or anchor_author_name
             seen_urls = {p["url"] for p in live_pages}
             added = 0
             for p in author_pages:

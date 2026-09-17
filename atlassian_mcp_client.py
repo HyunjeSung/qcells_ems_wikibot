@@ -595,9 +595,82 @@ def rovo_search(query, limit=5, fetch_full_pages=True, two_hop=True, timeout=20)
 
 # CQL의 creator 필드는 "~"(fuzzy) 연산자를 지원하지 않고 정확한 accountId만 받는다
 # (실측: `creator ~ "장승혁"` -> 400 Bad Request "Operator '~' is not supported for
-# field 'creator'"). 그래서 이름으로 바로 검색할 수 없고, 이미 확보한 accountId로만
-# 쓸 수 있다 — build_context()가 rovo_search 결과 중 제목에 그 이름이 그대로 들어있는
-# 문서의 author_id를 "본인 계정"으로 채택해서 넘겨준다.
+# field 'creator'"). 그래서 이름 -> accountId 변환이 별도로 필요한데, 처음엔
+# rovo_search(본문 텍스트 검색) 결과 중 제목에 이름이 들어있는 문서를 우연히
+# 찾으면 그 author_id를 쓰는 식으로 했었다. 그런데 실측해보니 이게 안정적이지
+# 않았다: "jack jang/장승혁 프로가 누구야?" 같은 질문은 원본(core="jack jang
+# 장승혁")도 확장(로마자 표기 포함)도 "jack"/"jang" 같은 흔한 영단어가 섞여서
+# rovo_search 자체가 "(장승혁)" 문서를 상위 결과에 아예 안 올리는 경우가 잦았다
+# ("프로" 사고와 같은 패턴 — 흔한 토큰이 랭킹을 지배). 그 결과 anchor를 못 찾아
+# search_by_creator가 아예 트리거되지 않는 재발이 실측됨(사용자가 3번 연속 같은
+# 질문으로 재현시킴, 2026-09-17 — "이렇게 문서에 그대로 작성자가 있는데"라고
+# Confluence 페이지 상단의 "By Jack Jang (Unlicensed)" 바이라인까지 직접 보여줌).
+#
+# 그래서 rovo_search 결과에 기대는 대신, CQL의 title ~ 연산자(fuzzy 지원)로 그
+# 이름이 제목에 들어간 문서를 직접, 결정적으로 찾는 별도 경로를 추가했다 — Rovo의
+# 불투명한 랭킹을 거치지 않으므로 "jack"/"프로" 같은 노이즈 토큰의 영향을 전혀
+# 받지 않는다.
+_LEADING_PAREN_RE = re.compile(r"^\s*\(([^)]*)\)")
+
+
+def find_author_id_by_title(name, limit=10, timeout=20):
+    """제목에 name(한글 이름 등)이 들어간 Confluence 페이지를 CQL로 찾아 그 작성자
+    accountId를 반환한다 — (author_id, author_name) 또는 실패/미발견 시 (None, None).
+
+    같은 이름이 제목에 있어도 실제 작성자(creator)는 다를 수 있다(실측: "(장승혁,
+    김다빈) Energy Flow 디자인 등록 출원"과 "(장승혁, 서국영) ... 디자인 등록 출원"
+    둘 다 creator가 장승혁이 아니라 이재형(jaehyeong.lee) — 특허 출원 문서를 대리로
+    작성한 사람으로 추정, 발명자 이름만 제목에 공동으로 올라간 것이었음. 반면
+    "(장승혁) 모니터링 시스템..."처럼 그 사람 **단독**으로 괄호 안에 표기된 문서는
+    실제로 본인이 creator였음.
+    **다수결은 틀렸다**(첫 구현, 실측으로 반증됨) — 이번 예시에서 공동 표기 문서
+    2건(이재형) vs 단독 표기 문서 1건(장승혁 본인)이라 다수결이 이재형을 잘못
+    채택했다(사용자가 "Jack Jang으로 작성된 문서를 찾아줘"가 빈손으로 돌아오는
+    것으로 재현시킴, 2026-09-17). 그래서 제목의 맨 앞 괄호 그룹을 콤마로 나눠서
+    **그 이름 "단독"으로만 표기된 문서를 우선** 채택하고(더 신뢰할 수 있는 신호),
+    단독 표기 후보가 하나도 없을 때만 다수결로 폴백한다."""
+    try:
+        token = _get_access_token()
+        session_id = _start_session(token)
+        space_clause = " OR ".join(f'space = "{s}"' for s in CONFLUENCE_TEAM_SPACES)
+        cql = f'title ~ "{name}" AND type = page AND ({space_clause})'
+        result = _call_tool_in_session(token, session_id, "searchConfluenceUsingCql", {
+            "cloudId": SITE_URL,
+            "cql": cql,
+            "limit": limit,
+        })
+    except Exception as e:
+        import sys
+        print(f"⚠️  제목 기반 작성자 조회 실패({name}): {e}", file=sys.stderr)
+        return None, None
+
+    payload = _tool_text_payload(result)
+    raw_results = payload.get("results", []) if isinstance(payload, dict) else []
+    counts = {}
+    names = {}
+    for r in raw_results:
+        created_by = r.get("content", {}).get("history", {}).get("createdBy", {}) or {}
+        account_id = created_by.get("accountId")
+        if not account_id:
+            continue
+
+        title = r.get("title", "")
+        m = _LEADING_PAREN_RE.match(title)
+        if m:
+            paren_names = [p.strip() for p in re.split(r"[,、]", m.group(1)) if p.strip()]
+            if paren_names == [name]:
+                # 맨 앞 괄호가 정확히 이 이름 하나만 담고 있음 — 단독 표기, 가장
+                # 신뢰할 수 있는 신호이므로 다수결을 거치지 않고 바로 채택한다.
+                return account_id, created_by.get("displayName")
+
+        counts[account_id] = counts.get(account_id, 0) + 1
+        names[account_id] = created_by.get("displayName")
+    if not counts:
+        return None, None
+    best = max(counts, key=counts.get)
+    return best, names.get(best)
+
+
 def search_by_creator(author_id, limit=10, timeout=20):
     """특정 인물(author_id)이 작성(creator)한 Confluence 페이지를 CQL로 전부 찾는다.
     Rovo Search(`search` 도구)는 본문 텍스트 매칭 위주라, 이름이 스치듯 한두 번만
