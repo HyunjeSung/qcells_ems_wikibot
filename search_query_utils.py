@@ -35,15 +35,32 @@ _KOREAN_TERMS = re.compile(r'[가-힣]{2,}')
 # 학습 목록에 추가한 직후에도 "김하율프로가 누구야"에 답을 못 찾음). 한글 이름의 로마자
 # 표기는 규칙적으로 유추가 안 되므로("하율" -> Hayul/Hayool/Ha-yul 등) _expand_search_query의
 # LLM 동의어 확장에 맡기지 않고 여기서 명시적으로 고정한다.
+#
+# **사람마다 여기 새로 추가하지 말 것**(2026-09-17, 사용자가 "Jack Jang"→"장승혁"
+# 항목을 넣은 것을 보고 직접 반려: "이렇게 하드코딩하지 말라고"). 소리로 전혀
+# 유추 안 되는 영문 별명("Jack Jang" 같은, Seunghyeok과 음성적 연관이 없는 지정
+# 영문 이름)은 대신 atlassian_mcp_client.py의 `_person_alias_cache`(런타임에
+# Confluence 데이터에서 실제로 찾아낸 결과를 스스로 기억하는 캐시)가 처리한다 —
+# 한 번이라도 정확한 이름으로 찾아진 인물은 그 뒤로 별명으로 물어도 코드 수정 없이
+# 바로 찾아짐. 이 딕셔너리는 "로마자 음역 자체가 불규칙한 한글 이름"(김하율 같은)
+# 전용으로 좁혀서 유지한다.
 _PERSON_NAME_ALIASES = {
     "김하율": "Hayool Kim",
 }
 
 
 def _apply_person_aliases(query: str) -> str:
-    """알려진 인물의 한글 이름이 질문에 있으면 검색용으로 영문 표기를 덧붙인다
-    (원문 치환이 아니라 부가 — 한글 표기로 매치되는 다른 문서가 있으면 그것도 유지)."""
-    extra = [en for ko, en in _PERSON_NAME_ALIASES.items() if ko in query]
+    """알려진 인물의 한글 이름 또는 영문 별칭이 질문에 있으면 검색용으로 반대쪽
+    표기를 덧붙인다(원문 치환이 아니라 부가 — 원래 표기로 매치되는 다른 문서가
+    있으면 그것도 유지). 양방향("김하율"->추가 "Hayool Kim", "Hayool Kim"->추가
+    "김하율")이라 어느 쪽으로 물어도 동일하게 보강된다."""
+    query_lower = query.lower()
+    extra = []
+    for ko, en in _PERSON_NAME_ALIASES.items():
+        if ko in query and en not in query:
+            extra.append(en)
+        elif en.lower() in query_lower and ko not in query:
+            extra.append(ko)
     return query + " " + " ".join(extra) if extra else query
 
 

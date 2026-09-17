@@ -612,6 +612,67 @@ def rovo_search(query, limit=5, fetch_full_pages=True, two_hop=True, timeout=20)
 # 받지 않는다.
 _LEADING_PAREN_RE = re.compile(r"^\s*\(([^)]*)\)")
 
+# 인물 이름 -> (accountId, displayName) 학습 캐시. **사람마다 미리 손으로 채워
+# 넣는 게 아니라**, find_author_id_by_title()가 Confluence CQL로 실제 찾아낸
+# 결과를 그 자리에서 기억해 둔다 — 코드에 이름을 추가하지 않아도, 어느 인물이든
+# 한 번이라도 정확한 이름(대개 한글)으로 찾아지면 그 계정의 실제 표시 이름(예:
+# "Jack Jang (Unlicensed)" — Seunghyeok과 음성적 연관이 전혀 없는 사내 지정 영문
+# 이름이라 로마자 음역 추측으로는 절대 못 맞히는 경우)까지 캐시에 같이 저장되고,
+# 그 뒤로는 그 영문 이름만으로 물어도(예: "jack jang이 누구야") 새 네트워크 호출
+# 없이 바로 같은 계정으로 풀린다.
+# 사용자가 "이렇게 하드코딩하지 말라고"라고 명시적으로 반려한(2026-09-17)
+# `_PERSON_NAME_ALIASES`(search_query_utils.py, "김하율"→"Hayool Kim" 처럼 로마자
+# 음역이 불규칙한 경우 전용) 방식과 대비되는 지점 — 이건 이름별 수작업이 아니라
+# 실제 조회 결과를 재사용하는 일반 메커니즘이다.
+# 프로세스 메모리에만 있어 서비스 재시작 시 비워진다(디스크 영속화는 다른 캐시들과
+# 같은 이유로 안 함 — query_expansion.py의 lru_cache 주석 참고) — 즉 서버를 막
+# 재시작한 직후 "jack jang이 누구야"처럼 한글 이름이 전혀 없는 질문을 가장 먼저
+# 던지면 그때는 못 찾는다(원천적 한계: "Jack Jang"이 accountId 메타데이터에만
+# 있고 문서 제목/본문 어디에도 텍스트로 안 나와서 CQL로 직접 찾을 방법이 없음 —
+# lookupJiraAccountId 유저 디렉터리 조회도 이 계정이 "Unlicensed"라 대상에서
+# 빠짐, 이미 확인함). 이후 같은 세션에서 누군가 그 인물을 한글 이름으로라도 한 번
+# 물으면 그 다음부터는 영문 이름만으로도 항상 찾아진다.
+_person_alias_cache = {}
+# Confluence 표시 이름은 라이선스 해지 계정에 "(Unlicensed)" 같은 상태 접미사가
+# 붙는다(예: "Jack Jang (Unlicensed)") — 이 통째를 캐시 키로 쓰면 사용자가 실제로
+# 타이핑하는 "jack jang"이 부분 문자열로 안 들어맞는다(실측으로 발견: 캐시엔
+# "jack jang (unlicensed)"만 있어서 "jack jang이 누구야" lookup이 빗나감).
+_DISPLAY_SUFFIX_RE = re.compile(r"\s*\([^)]*\)\s*$")
+
+
+def _cache_key(name):
+    return (name or "").strip().lower()
+
+
+def _remember_person(account_id, display_name, *found_via_names):
+    entry = (account_id, display_name)
+    bare_display_name = _DISPLAY_SUFFIX_RE.sub("", display_name or "").strip()
+    for n in list(found_via_names) + [display_name, bare_display_name]:
+        key = _cache_key(n)
+        if key:
+            _person_alias_cache[key] = entry
+
+
+def lookup_cached_person(name):
+    """이미 학습된 이름(한글 원본으로 찾아졌던 이름, 또는 그 계정의 실제 표시
+    이름)이면 네트워크 호출 없이 (accountId, displayName)을 바로 반환. 없으면
+    None."""
+    return _person_alias_cache.get(_cache_key(name))
+
+
+def lookup_cached_person_in_text(text):
+    """text(질문 원문 등) 안에 학습된 이름이 부분 문자열로 들어있으면 그 계정을
+    반환한다. "Jack Jang"처럼 공백이 있는 표시 이름은 단어 단위로 쪼개면 (예:
+    _extract_terms로 "Jack"/"Jang" 분리) 캐시 키("jack jang")와 안 맞으므로, 쪼개기
+    전의 원문 문자열을 통째로 대상으로 부분 문자열 검사한다. 캐시가 작아서
+    (실제로 조회된 인물 수만큼만 있음) 매 질문마다 전체를 훑어도 비용이 무시할
+    만하다."""
+    text_lower = (text or "").lower()
+    for key, entry in _person_alias_cache.items():
+        if key and key in text_lower:
+            return entry
+    return None
+
 
 def find_author_id_by_title(name, limit=10, timeout=20):
     """제목에 name(한글 이름 등)이 들어간 Confluence 페이지를 CQL로 찾아 그 작성자
@@ -629,6 +690,10 @@ def find_author_id_by_title(name, limit=10, timeout=20):
     것으로 재현시킴, 2026-09-17). 그래서 제목의 맨 앞 괄호 그룹을 콤마로 나눠서
     **그 이름 "단독"으로만 표기된 문서를 우선** 채택하고(더 신뢰할 수 있는 신호),
     단독 표기 후보가 하나도 없을 때만 다수결로 폴백한다."""
+    cached = lookup_cached_person(name)
+    if cached:
+        return cached
+
     try:
         token = _get_access_token()
         session_id = _start_session(token)
@@ -661,14 +726,18 @@ def find_author_id_by_title(name, limit=10, timeout=20):
             if paren_names == [name]:
                 # 맨 앞 괄호가 정확히 이 이름 하나만 담고 있음 — 단독 표기, 가장
                 # 신뢰할 수 있는 신호이므로 다수결을 거치지 않고 바로 채택한다.
-                return account_id, created_by.get("displayName")
+                display_name = created_by.get("displayName")
+                _remember_person(account_id, display_name, name)
+                return account_id, display_name
 
         counts[account_id] = counts.get(account_id, 0) + 1
         names[account_id] = created_by.get("displayName")
     if not counts:
         return None, None
     best = max(counts, key=counts.get)
-    return best, names.get(best)
+    best_name = names.get(best)
+    _remember_person(best, best_name, name)
+    return best, best_name
 
 
 def search_by_creator(author_id, limit=10, timeout=20):

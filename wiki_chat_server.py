@@ -35,7 +35,7 @@ from query_expansion import _expand_search_query  # claude -p 검색어 확장 �
 from confluence_to_text import render as render_storage_html
 from bs4 import BeautifulSoup
 from atlassian_mcp_client import (
-    rovo_search, search_by_creator, find_author_id_by_title,
+    rovo_search, search_by_creator, find_author_id_by_title, lookup_cached_person_in_text,
     _EMPTY_BODY_NOTE, _confluence_space_of, CONFLUENCE_PERSONAL_SPACE_OWNERS,
 )
 import wiki_chat_history as chat_history
@@ -838,31 +838,48 @@ def build_context(question, history=None):
     # core는 "Jack Jang 작성 문서"(한글 이름 없음)였지만 keywords엔 "장승혁"이
     # 포함돼 있었음(2026-09-17, 사용자가 "Jack Jang으로 작성된 문서를 찾아줘"로
     # 재현시켜 발견).
-    person_name_candidates = [
-        t for t in original_terms + expanded_keywords.split()
-        if re.fullmatch(r"[가-힣]{2,4}", t)
-    ]
-    if person_name_candidates:
+    #
+    # **하지만 이것도 claude -p 샘플링 비결정성 때문에 매번 성공하지 않는다**
+    # (실측: "jack jang이 누구야"를 반복하면 확장 키워드에 "장승혁"이 들어갈 때도,
+    # 안 들어갈 때도 있음 — 사용자가 직접 3번 이상 재현시킴). "Jack Jang"은
+    # Seunghyeok과 음성적 연관이 없는 사내 지정 영문 이름이라 애초에 LLM이 매번
+    # 안정적으로 추측할 수 있는 종류가 아니다. 그렇다고 이름마다 하드코딩 별칭을
+    # 추가하는 것도 사용자가 명시적으로 반려함("이렇게 하드코딩하지 말라고") — 대신
+    # `lookup_cached_person_in_text()`로 **이 세션에서 이미 한 번이라도 정확한
+    # 이름(한글)으로 찾아낸 적 있는 인물인지** 먼저 확인한다(네트워크 호출 없음,
+    # atlassian_mcp_client.py의 `_person_alias_cache` 참고) — find_author_id_by_title()이
+    # 성공할 때마다 그 계정의 실제 표시 이름까지 자동으로 기억해두므로, 예를 들어
+    # "장승혁"으로 먼저 한 번 찾아진 뒤로는 "jack jang이 누구야"만 물어도 코드
+    # 수정 없이 바로 풀린다(이름별 수작업이 아니라 실제 조회 결과 재사용).
+    cached = lookup_cached_person_in_text(question) or lookup_cached_person_in_text(expanded_keywords)
+    if cached:
+        anchor_author_id, anchor_author_name = cached
+    else:
         anchor_author_id = anchor_author_name = None
+        person_name_candidates = [
+            t for t in original_terms + expanded_keywords.split()
+            if re.fullmatch(r"[가-힣]{2,4}", t)
+        ]
         for name in person_name_candidates:
             anchor_author_id, anchor_author_name = find_author_id_by_title(name)
             if anchor_author_id:
                 break
-        if anchor_author_id:
-            author_pages, author_display_name = search_by_creator(anchor_author_id, limit=10)
-            author_display_name = author_display_name or anchor_author_name
-            seen_urls = {p["url"] for p in live_pages}
-            added = 0
-            for p in author_pages:
-                if p["url"] in seen_urls:
-                    continue
-                if author_display_name:
-                    p["author_display_name"] = author_display_name
-                live_pages.append(p)
-                seen_urls.add(p["url"])
-                added += 1
-                if added >= 6:  # 발췌만 쓰지만 소스 목록이 너무 길어지지 않게 상한
-                    break
+
+    if anchor_author_id:
+        author_pages, author_display_name = search_by_creator(anchor_author_id, limit=10)
+        author_display_name = author_display_name or anchor_author_name
+        seen_urls = {p["url"] for p in live_pages}
+        added = 0
+        for p in author_pages:
+            if p["url"] in seen_urls:
+                continue
+            if author_display_name:
+                p["author_display_name"] = author_display_name
+            live_pages.append(p)
+            seen_urls.add(p["url"])
+            added += 1
+            if added >= 6:  # 발췌만 쓰지만 소스 목록이 너무 길어지지 않게 상한
+                break
 
     # 본문이 진짜로 비어있는 페이지(다이어그램/엑셀 첨부파일만 있음)는 원본 첨부파일을
     # 직접 파싱해서 보완한다(_fetch_attachment_text 참고, 사용자 확정 2026-08-12).
