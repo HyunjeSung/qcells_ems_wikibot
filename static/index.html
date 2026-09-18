@@ -402,6 +402,24 @@
     white-space: nowrap;
   }
   .feedback-btn:hover { color: var(--text); border-color: var(--text-dim); }
+  .copy-btn {
+    flex: none;
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: 14px;
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+    font-family: inherit;
+    padding: 0;
+  }
+  .copy-btn:hover { color: var(--text); border-color: var(--text-dim); }
 
   .feedback-overlay {
     position: fixed; inset: 0;
@@ -620,6 +638,14 @@
   });
   fetch('/api/whoami').then(r => r.json()).then(data => {
     if (data.admin) logoutBtn.style.display = 'flex';
+    // 버전 배지는 원래 이 HTML에 "v1.2.2"로 하드코딩돼 있어서 배포 때마다 직접 고쳐야
+    // 했다 — 이제 wikibot.env의 WIKIBOT_VERSION을 /api/whoami로 받아 그대로 표시한다
+    // (2026-09-18, 사용자 요청). 값이 없으면 서버가 이미 "dev"를 내려주므로 그대로 둠.
+    if (data.version) {
+      document.querySelectorAll('.version-badge').forEach(el => {
+        el.textContent = 'v' + data.version;
+      });
+    }
   }).catch(() => {});
 
   let history = [];
@@ -941,12 +967,65 @@
     return block;
   }
 
+  // 이 위키봇은 사내망 http(평문)로 서빙돼서 navigator.clipboard가 secure
+  // context(https/localhost)에서만 열리는 브라우저 제약에 걸려 아예 없거나
+  // 조용히 실패할 수 있다 — execCommand('copy')로 폴백(오래됐지만 http에서도
+  // 대부분 아직 동작함).
+  function copyTextToClipboard(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text);
+    }
+    return new Promise((resolve, reject) => {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      let ok = false;
+      try {
+        ok = document.execCommand('copy');
+      } catch (e) {
+        // no-op — 아래 finally 후 reject
+      }
+      document.body.removeChild(ta);
+      ok ? resolve() : reject(new Error('복사에 실패했습니다'));
+    });
+  }
+
   function appendMessageActions(bubble, sources, transcript) {
     const row = document.createElement('div');
     row.className = 'msg-actions';
 
     const sourcesBlock = buildSourcesBlock(sources);
     if (sourcesBlock) row.appendChild(sourcesBlock);
+
+    // 이모지(📋/✅)는 브라우저가 항상 고유 색으로 그려서 CSS color를 안 따른다 —
+    // "색깔없게" 요청(2026-09-18)에 맞춰 currentColor를 쓰는 인라인 SVG로 교체,
+    // 버튼 글자색(var(--text-dim)/hover 시 var(--text))을 그대로 물려받는다.
+    const COPY_ICON_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+    const CHECK_ICON_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+
+    const copyBtn = document.createElement('button');
+    copyBtn.type = 'button';
+    copyBtn.className = 'copy-btn';
+    copyBtn.title = '답변 복사';
+    copyBtn.setAttribute('aria-label', '답변 복사');
+    copyBtn.innerHTML = COPY_ICON_SVG;
+    copyBtn.addEventListener('click', () => {
+      const last = transcript && transcript.length ? transcript[transcript.length - 1] : null;
+      const answerText = last && last.role === 'assistant' ? last.content : '';
+      copyTextToClipboard(answerText).then(() => {
+        copyBtn.innerHTML = CHECK_ICON_SVG;
+        setTimeout(() => {
+          copyBtn.innerHTML = COPY_ICON_SVG;
+        }, 1500);
+      }).catch(() => {
+        copyBtn.title = '복사 실패 — 직접 선택해 복사해주세요';
+      });
+    });
+    row.appendChild(copyBtn);
 
     const feedbackBtn = document.createElement('button');
     feedbackBtn.type = 'button';
