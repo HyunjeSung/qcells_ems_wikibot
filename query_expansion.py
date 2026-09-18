@@ -8,8 +8,11 @@ wiki_chat_server.py의 답변 합성 로직과는 독립적인 관심사(검색�
 
 import functools
 import json
+import re
 import shutil
 import subprocess
+
+from usage_guard import looks_like_usage_limit_error, mark_usage_exhausted
 
 
 def _claude_cli_available():
@@ -48,7 +51,8 @@ def _expand_search_query_llm_call(prompt, timeout=30):
         # (실측: 20초+ 타임아웃) 엉뚱한 응답(가상의 Bash 실행 서술 등)을 내놓는다.
         # 최소한의 역할 지정 + 도구 완전 비활성화로 순수 JSON 완성만 하게 만든다.
         "--system-prompt",
-        '너는 검색어 JSON만 출력하는 도구다. 반드시 {"core": "...", "keywords": ["...", ...]} '
+        '너는 검색어 JSON만 출력하는 도구다. 반드시 '
+        '{"core": "...", "keywords": ["...", ...], "person": "..." 또는 null} '
         "형식 하나만 출력하고, 코드펜스나 다른 설명은 절대 붙이지 마라.",
         "--tools", "",
     ]
@@ -58,16 +62,45 @@ def _expand_search_query_llm_call(prompt, timeout=30):
             return None
         data = json.loads(result.stdout)
         if data.get("is_error"):
+            if looks_like_usage_limit_error(data.get("result")):
+                mark_usage_exhausted(data.get("result"))
             return None
         return _parse_expansion(data["result"])
     except Exception:
         return None
 
 
+# person 필드 조사 제거 안전망(2026-09-18 추가) — <instructions>에 조사 제거
+# 규칙을 명시하고 few-shot도 추가했지만, claude -p는 같은 지시에도 매번 순종하지
+# 않는다(이 파일 전체에 반복되는 샘플링 비결정성 문제, 위 주석들 참고). 실측:
+# "심철로된 jira티켓 검색..."을 5번 반복하면 4번은 person="심철"로 정확히
+# 나오지만 1번은 person="심철로"(조사 "로"가 안 떨어짐)로 나와서 그 계정을 영영
+# 못 찾았다(사용자가 "오타 아닌데"라며 재현, 2026-09-18). **정규식으로 조사를
+# 떼는 안전망을 처음엔 추가했다가 사용자가 반려함**("이렇게 하드코딩하지말고,
+# 프롬프트엔지니어링을 잘해서 키워드를 뽑아내는 라이브러리있니?") — 실제로
+# "은/는/이/가/을/를" 같은 흔한 조사는 "지은"/"수은"처럼 실제 이름 끝음절과도
+# 겹쳐서, 정규식으로 떼면 없던 오탐을 새로 만들 위험이 있었다(이 파일 위쪽
+# person 필드 지시문/few-shot 개선으로 대응 — 실측 케이스를 <examples>에 추가).
+# 그래도 claude -p는 확률적이라 100% 보장은 안 되므로, 실패 시엔 아래
+# find_author_id_by_title() 호출부(wiki_chat_server.py)에서 **같은 LLM을 캐시
+# 우회하고 한 번 더 호출하는 재시도**로 대응한다 — 문자열을 우리가 손대는 대신
+# LLM 자체의 샘플링 비결정성을 재시도로 활용하는 것("정규식으로 고치기"가 아니라
+# "다시 물어보기").
+def _expand_search_query_llm_call_nocache(prompt, timeout=30):
+    """_expand_search_query_llm_call()과 동일하지만 lru_cache를 우회한다 — 재시도
+    전용. 같은 prompt로 그냥 다시 부르면 캐시가 그대로 돌려줘서(같은 실패를 또
+    반환) 재시도 의미가 없으므로, 데코레이터가 감싸기 전의 원본 함수
+    (`.__wrapped__`)를 직접 호출해 새 claude -p 샘플을 받는다."""
+    return _expand_search_query_llm_call.__wrapped__(prompt, timeout)
+
+
 def _parse_expansion(raw_text):
-    """모델 출력에서 {"core": "...", "keywords": [...]}를 뽑아 (core, keywords_str)로
-    반환한다. core가 비어있으면 keywords 첫 항목으로 대체(모델이 core를 빠뜨려도
-    완전히 못 쓰게 되지 않도록).
+    """모델 출력에서 {"core": "...", "keywords": [...], "person": "..."/null}을 뽑아
+    (core, keywords_str, person)으로 반환한다. core가 비어있으면 keywords 첫 항목으로
+    대체(모델이 core를 빠뜨려도 완전히 못 쓰게 되지 않도록). person은 질문이 특정
+    인물 한 명을 콕 집어 묻는 게 아니면 빈 문자열/null/누락 다 None으로 정규화한다
+    (build_context()가 이 필드만 보고 작성자 검색 앵커를 잡으므로, 모호하면 None 쪽이
+    안전 — 아래 person 필드 설명 참고).
 
     지시에도 불구하고 ```json 코드펜스나 앞뒤 설명을 붙이는 경우가 있어서,
     첫 '{'~마지막 '}' 구간만 잘라 파싱한다(관대한 파싱 — 실패하면 그냥 폴백)."""
@@ -85,7 +118,8 @@ def _parse_expansion(raw_text):
     if not cleaned:
         return None
     core = str(obj.get("core") or "").strip() or cleaned[0]
-    return core, " ".join(cleaned)
+    person = str(obj.get("person") or "").strip() or None
+    return core, " ".join(cleaned), person
 
 
 # 프롬프트를 <섹션> 태그로 구조화하고, 규칙을 줄글로 설명하는 대신 실제 실패
@@ -121,29 +155,41 @@ def _parse_expansion(raw_text):
 # 채택 안 함 — 아래 <instructions>에도 이 축을 명시.
 _FEWSHOT_EXAMPLES = """<example>
 <question>DeviceManager 동작원리 알려줘</question>
-<output>{"core": "DeviceManager 동작원리", "keywords": ["DeviceManager", "동작원리", "architecture", "구조", "design"]}</output>
+<output>{"core": "DeviceManager 동작원리", "keywords": ["DeviceManager", "동작원리", "architecture", "구조", "design"], "person": null}</output>
 </example>
 <example>
 <question>BMS가 뭐야</question>
-<output>{"core": "BMS", "keywords": ["BMS", "Battery Management System", "배터리 관리 시스템"]}</output>
+<output>{"core": "BMS", "keywords": ["BMS", "Battery Management System", "배터리 관리 시스템"], "person": null}</output>
 </example>
 <example>
 <question>홍길동이 뭐야</question>
-<output>{"core": "홍길동", "keywords": ["홍길동", "Gildong Hong", "gildong.hong", "gildonghong"]}</output>
+<output>{"core": "홍길동", "keywords": ["홍길동", "Gildong Hong", "gildong.hong", "gildonghong"], "person": "홍길동"}</output>
 </example>
 <example>
 <question>gem net id 가 ffff 가 아닌 예시 찾아줘</question>
-<output>{"core": "gem net id ffff 아닌 예시", "keywords": ["GEM", "Net ID", "GEM Net ID", "GEM-NET-ID", "gem_net_id", "non-FFFF"]}</output>
+<output>{"core": "gem net id ffff 아닌 예시", "keywords": ["GEM", "Net ID", "GEM Net ID", "GEM-NET-ID", "gem_net_id", "non-FFFF"], "person": null}</output>
 </example>
 <example>
 <context>[사용자] Energy SW 인원 정보 알려줘
 [위키봇] (인원 명단 답변)</context>
 <question>담당업무 로테이션으로 바꾸고 싶은데</question>
-<output>{"core": "Energy SW 담당업무 로테이션", "keywords": ["Energy SW", "담당업무", "로테이션", "Job Rotation", "직무순환", "인사이동"]}</output>
+<output>{"core": "Energy SW 담당업무 로테이션", "keywords": ["Energy SW", "담당업무", "로테이션", "Job Rotation", "직무순환", "인사이동"], "person": null}</output>
 </example>
 <example>
 <question>jack jang/장승혁 프로가 누구야?</question>
-<output>{"core": "jack jang 장승혁", "keywords": ["장승혁", "Jack Jang", "jack.jang", "jackjang", "Seunghyuk Jang", "seunghyuk.jang"]}</output>
+<output>{"core": "jack jang 장승혁", "keywords": ["장승혁", "Jack Jang", "jack.jang", "jackjang", "Seunghyuk Jang", "seunghyuk.jang"], "person": "장승혁"}</output>
+</example>
+<example>
+<question>장승혁이 문서 몇 개 썼어</question>
+<output>{"core": "장승혁 문서", "keywords": ["장승혁", "Jack Jang", "jack.jang", "jackjang"], "person": "장승혁"}</output>
+</example>
+<example>
+<question>confluence에서, EnergySW 파트 인원을 한정하여, 각각의 인원이 얼마나 많은 page를 생성했는지 정리부탁합니다.</question>
+<output>{"core": "EnergySW 파트 인원 page 생성", "keywords": ["EnergySW", "Energy SW", "인원", "page", "생성", "작성", "페이지 수", "created pages", "author"], "person": null}</output>
+</example>
+<example>
+<question>심철로된 jira티켓 검색, 시간별로 급한것 정렬</question>
+<output>{"core": "심철 jira 티켓 시간별 급한것 정렬", "keywords": ["심철", "Cheol Sim", "sim.cheol", "Jira", "티켓", "우선순위", "priority", "마감일", "due date"], "person": "심철"}</output>
 </example>"""
 
 _INSTRUCTIONS = """사내 기술 위키/Confluence 검색에 쓸 검색어를 만드는 도구다.
@@ -174,18 +220,51 @@ _INSTRUCTIONS = """사내 기술 위키/Confluence 검색에 쓸 검색어를 �
     문서(주간업무 인원 명단 등)만 검색 상위로 끌어올려 정작 찾는 사람의
     문서를 밀어낸다. 직함(부장/팀장 등)도 실제 직함을 모르면 추측해서
     붙이지 마라 — 틀린 추측은 물론 정확한 추측이어도 검증할 방법이 없다
-아래 <example>들을 참고해라. 출력은 반드시 {"core": "...", "keywords": [...]}
+- "person": 질문이 특정 인물 "한 명"을 콕 집어 묻고 있으면(예: 그 사람이
+  누구인지, 무엇을 했는지, 문서를 몇 개/무엇을 작성했는지) 그 사람의 이름을
+  문자열로, 아니면 반드시 null로. "EnergySW 파트 인원 전체가 각각 몇 개
+  썼는지"처럼 여러 사람/그룹을 묻는 질문, 또는 사람 이름이 전혀 없는 질문은
+  null이다 — "파트", "인원", "각각", "생성" 같은 일반 명사를 사람 이름으로
+  착각해서 넣으면 안 된다(이 필드가 하는 일이 정확히 그 착각을 막는 것 —
+  예전엔 이 판단을 정규식(한글 2~4음절이면 사람 이름일 것)으로 대충
+  했었는데, "파트"/"인원" 같은 흔한 단어까지 걸려서 전혀 무관한 사람이
+  작성자로 잘못 지목되는 사고가 실측됨, 2026-09-18). 확신이 없으면 null을
+  택해라 — 잘못 채우면 엉뚱한 사람의 문서가 답변에 섞여 들어간다.
+  **이름 뒤에 붙는 조사("로/으로/가/이/를/을/은/는/에게/한테" 등)는 반드시
+  떼고 순수한 이름만 넣어라** — "심철로 된 jira 티켓"처럼 조사가 이름에
+  바로 붙는 문장에서 "심철로"를 그대로 person에 넣으면(조사 미제거) 그
+  계정을 영영 못 찾는다(실측: person="심철로"로 나온 요청은 계정 조회가
+  0건으로 실패, "심철"이면 정상 조회됨 — 사용자가 "오타 아닌데"라며 재현,
+  2026-09-18). "core" 필드의 조사 제거 규칙과 동일한 기준을 person에도
+  똑같이 적용해라.
+아래 <example>들을 참고해라. 출력은 반드시
+{"core": "...", "keywords": [...], "person": "..." 또는 null}
 JSON 하나만, 다른 설명·코드펜스는 절대 붙이지 마라."""
 
 
 def _expand_search_query(question, history=None, timeout=30):
-    """(core, keywords_str) 튜플을 반환한다. core는 문법적 잡음만 걷어낸 원본 검색어
-    (build_context()의 1차/신뢰 검색어로 사용), keywords_str은 동의어/표기 변형까지
-    포함한 보완 검색어(2차/확장 검색에 사용). claude -p 실패/타임아웃/미설치 시
-    (question, question)으로 폴백 — 검색 자체를 막으면 안 되므로 조용히 원문 그대로
-    진행한다."""
+    """(core, keywords_str, person) 튜플을 반환한다. core는 문법적 잡음만 걷어낸
+    원본 검색어(build_context()의 1차/신뢰 검색어로 사용), keywords_str은 동의어/
+    표기 변형까지 포함한 보완 검색어(2차/확장 검색에 사용), person은 질문이 특정
+    인물 한 명을 콕 집어 물을 때만 그 이름(아니면 None) — build_context()가
+    작성자(author) 검색 앵커를 잡을 유일한 근거로 쓴다(정규식으로 "한글 2~4음절"을
+    사람 이름 취급하던 예전 방식은 "파트"/"인원" 같은 일반 명사까지 걸려서 폐기,
+    atlassian_mcp_client.py 근처 주석 참고 대신 여기 <instructions>의 person 설명
+    참고). claude -p 실패/타임아웃/미설치 시 (question, question, None)으로 폴백
+    — 검색 자체를 막으면 안 되므로 조용히 원문 그대로 진행하되, 이 경우엔 person을
+    추측할 방법이 없으므로 작성자 앵커링 자체가 꺼진다(일관된 저하 — 다른 확장
+    품질도 이미 같이 저하되는 상황이라 person만 별도 정규식 안전망을 두지 않는다)."""
     if not _claude_cli_available():
-        return question, question
+        return question, question, None
+    prompt = _build_expand_prompt(question, history)
+    result = _expand_search_query_llm_call(prompt, timeout)
+    if not result:
+        return question, question, None
+    core, keywords_str, person = result
+    return core, keywords_str, person
+
+
+def _build_expand_prompt(question, history=None):
     context_block = ""
     if history and len(history) > 1:
         recent = history[:-1][-4:]  # 최신 질문 이전 최근 2턴 정도
@@ -195,14 +274,189 @@ def _expand_search_query(question, history=None, timeout=30):
             content = (m.get("content") or "")[:300]
             lines.append(f"[{speaker}] {content}")
         context_block = f"<context>\n{chr(10).join(lines)}\n</context>\n\n"
-    prompt = (
+    return (
         f"<instructions>\n{_INSTRUCTIONS}\n</instructions>\n\n"
         f"<examples>\n{_FEWSHOT_EXAMPLES}\n</examples>\n\n"
         f"{context_block}"
         f"<question>{question}</question>"
     )
-    result = _expand_search_query_llm_call(prompt, timeout)
+
+
+def retry_person_extraction(question, history=None, timeout=30):
+    """find_author_id_by_title()이 person 필드로 끝내 계정을 못 찾았을 때만 호출
+    하는 재시도 전용 함수 — 같은 claude -p 프롬프트를 캐시 우회(nocache)로 한 번
+    더 불러서 person만 새로 뽑는다. 실측: "심철로된 jira티켓 검색..."을 5번
+    반복하면 4번은 person="심철"로 정확히 나오지만 1번은 person="심철로"(조사
+    "로" 미제거)로 나와서 계정을 못 찾았다(사용자가 "오타 아닌데"라며 재현,
+    2026-09-18). 문자열을 정규식으로 고치는 대신(사용자가 명시적으로 반려 —
+    "은/는/이/가" 등은 실제 이름 끝음절과 겹쳐 오탐 위험) claude -p 자체의
+    샘플링 비결정성을 재시도로 활용한다: 같은 질문을 다시 물으면 5번 중 4번
+    꼴로 정확한 답이 나오므로, 실패했을 때만 한 번 더 물어보는 것으로 충분히
+    커버된다. 실패 시 None(호출부가 안전하게 폴백하도록)."""
+    if not _claude_cli_available():
+        return None
+    prompt = _build_expand_prompt(question, history)
+    result = _expand_search_query_llm_call_nocache(prompt, timeout)
     if not result:
-        return question, question
-    core, keywords_str = result
-    return core, keywords_str
+        return None
+    _, _, person = result
+    return person
+
+
+# atlassian_mcp_client.py의 find_author_id_by_title()이 쓰던 예전 로직: 이름이 제목에
+# 들어간 문서들을 CQL로 모아서 "가장 많이 매칭된 계정"을 다수결로 채택했다. 그런데
+# 실측으로 이게 틀렸다 — "정지석"으로 검색된 문서들의 creator 다수결이 실제로는
+# 무관한 사람(Heela Park, "정지석"이 참석자/언급자로만 등장하는 회의록·명단성 문서를
+# 다수 작성한 계정으로 추정)을 잘못 골라냄(사용자가 "정지석 프로가 creator인 페이지
+# 몇 건인지 확인해줘"로 재현시킴, 2026-09-18). 앞서 "(장승혁, 김다빈)"류 공동 표기
+# 문서 사고 때 추가했던 "단독 표기 우선" 규칙(atlassian_mcp_client.py 참고)만으로는
+# 부족했던 셈 — 단독 표기 후보가 하나도 없으면 여전히 다수결로 떨어진다.
+#
+# 사용자가 명시적으로 요청(2026-09-18): "사람이름에 대해 하드코딩된 키워드
+# 사용하지말고, llm으로 추론할수있어?" — 그래서 다수결(count 최댓값)을 LLM
+# 판단으로 대체한다. 후보 각각이 창작한, 이름이 제목에 들어간 문서 제목들을 보여주고
+# "이 중 누가 실제 그 사람인지" 판단하게 한다 — 제목에 이름이 하나만 단독으로 있는
+# 문서는 강한 증거, 여러 명이 공동으로 표기된 문서는 약한 증거라는 걸 규칙으로
+# 명시했다(예전 코드가 정확히 이 두 신호를 분간하려다 다수결에서 실패했던 지점).
+#
+# **처음엔 "후보가 1개뿐이면 LLM 안 부르고 그냥 채택"했었는데(불필요한 지연/비용을
+# 피하려는 의도), 이게 또 다른 사고를 냈다**(2026-09-18, EnergySW 파트 18명 일괄
+# 집계 실측 중 재현): "이선정"으로 CQL title~ 검색을 하면 "US AC System
+# Overview(by 이선정)" 딱 한 건만 나오는데, 이 문서의 실제 creator는 이선정이
+# 아니라 고윤석(Yunseok Ko)이었다 — "(by 누구)" 표기는 그 사람 얘기를 다룬다는
+# 뜻이지 그 사람이 작성했다는 뜻이 아닌데, 후보가 1개뿐이라는 이유만으로 판단 없이
+# 그대로 채택해버려서 "김건우"까지 똑같은 패턴("EU DC system Overview(by
+# 김건우)")으로 엉뚱하게 같은 사람(고윤석)에게 잘못 배정됐다. 그래서 후보가
+# 1개여도 반드시 LLM 판단을 거친다 — "후보 수"가 아니라 "증거의 질"로 신뢰도를
+# 매기는 게 애초 목적이었는데 1개일 때만 그 목적을 건너뛰고 있었던 셈.
+# Jira 증거 축 추가(2026-09-18, 사용자 제안: "jira를 연동하면 사람-계정이
+# 매칭될수있을것 같애") — search_jira_mentions()가 JQL text~ 검색(본문/댓글까지
+# 훑음)으로 찾은, 그 이름이 언급된 이슈들의 assignee를 후보로 같이 준다.
+# Confluence 제목검색보다 커버리지는 넓지만(제목에 이름이 없어도 찾아짐) 똑같이
+# 다수결로 믿으면 안 된다 — 실측: "고윤석"으로 검색된 이슈들의 assignee 1위는
+# 본인이 아니라 전혀 다른 사람이었다(추정: 고윤석님이 DevOps/CI 업무 특성상 여러
+# 사람 티켓에 리뷰어로 코멘트를 남겨서, "이름이 언급됨"과 "assignee=본인"이
+# 오히려 다른 사람 쪽에서 더 자주 겹친 것으로 보임). 그래서 "담당 이슈 개수가
+# 많다"는 이유만으로 고르면 안 되고, Confluence와 동일하게 증거 하나하나의 질로
+# 판단해야 한다.
+_PERSON_PICK_INSTRUCTIONS = """Confluence/Jira 검색으로 어떤 사람의 계정을 찾으려 한다.
+아래는 후보(1명 이상)와 각자의 증거 목록이다. 증거는 두 종류다:
+- "[Confluence 제목] ..." — 그 이름이 제목에 들어간 Confluence 문서를 실제로
+  작성(creator)한 기록. Confluence의 creator는 "그 페이지를 실제로 만든/업로드한
+  계정"일 뿐이다 — 문서 제목에 그 이름이 있다고 creator가 본인이라는 뜻은 아니다.
+- "[Jira 담당 이슈] ..." — 그 이름이 본문/댓글 어딘가에 언급된 Jira 이슈의
+  담당자(assignee) 기록. 담당자라고 해서 그 이슈 안에 언급된 이름의 당사자라는
+  뜻은 아니다 — 다른 사람 얘기가 나온 이슈를 그냥 담당하고 있을 뿐일 수도,
+  리뷰어/멘션 대상으로 코멘트에 등장했을 뿐일 수도 있다.
+
+후보들의 증거를 보고, 질문의 인물 본인일 가능성이 가장 높은 후보를 번호로 골라라.
+
+판단 기준:
+- 제목 맨 앞에 그 이름이 "단독으로만" 표기된 Confluence 문서(예: "(장승혁)
+  모니터링 시스템")는 강한 증거다 — 그 사람 본인이 쓴 개인 문서일 가능성이 높다.
+- 다음은 모두 약한 증거다(실제 작성/담당 이유가 그 인물 본인이 아닐 수 있음):
+  - 제목에 여러 사람 이름이 함께 표기된 공동/집계 Confluence 문서(예: "(장승혁,
+    김다빈) 디자인 등록 출원", "OOO 파트 주간 업무", 회의록/명단)
+  - "(by 이름)", "이름 정리", "이름 요청" 처럼 그 사람에 "대한"/"위한" 문서라는
+    표기 — 작성 주체가 아니라 대상/의뢰인일 수 있다
+  - Jira 담당 이슈 증거 단독으로는 항상 약하다 — 같은 이름이 여러 건에서
+    반복돼도(빈도가 높아도) 그 자체가 강한 증거는 아니다. 다만 Confluence
+    단독표기처럼 강한 증거가 이미 있는 후보를 Jira 담당 이슈가 같이 뒷받침하면
+    확신을 더 높여도 된다.
+  - 후보가 단 1명뿐이라는 사실 자체는 증거가 아니다 — 후보 수와 무관하게 위
+    기준으로 증거 자체의 질을 판단해라
+- 증거가 전부 약하거나 판단이 애매하면(후보가 1명뿐이어도) 반드시 null을 골라라
+  — 틀린 추측보다 "모르겠다"가 낫다.
+
+출력은 반드시 {"choice": <후보 번호(정수)> 또는 null} JSON 하나만, 다른 설명·
+코드펜스 없이."""
+
+_PERSON_PICK_FEWSHOT = """<example>
+인물: "이선정"
+후보:
+1. Yunseok Ko — 문서: US AC System Overview(by 이선정)
+<output>{"choice": null}</output>
+</example>
+<example>
+인물: "장승혁"
+후보:
+1. Jaehyeong Lee — 문서: (장승혁, 김다빈) Energy Flow 디자인 등록 출원; (장승혁, 서국영) Energy Flow 디자인 등록 출원
+2. Jack Jang — 문서: (장승혁) 모니터링 시스템 설계서
+<output>{"choice": 2}</output>
+</example>
+<example>
+인물: "정지석"
+후보:
+1. Heela Park — 문서: 2026 CW13 Energy SW part 주간 업무; 2025 CW48 Energy SW part 주간 업무
+<output>{"choice": null}</output>
+</example>
+<example>
+인물: "신동진"
+후보:
+1. Kim taehun — 문서: [Jira 담당 이슈] [ECR32] ACCB EMS 진단 에러코드 추가
+2. Dongjin.Shin — 문서: [Jira 담당 이슈] [CASE5] Secondary 장비 Hysteresis High 오류 현상; [Jira 담당 이슈] [CASE6] ACCB EMS Startup Sequence 이상; [Jira 담당 이슈] External CT PCS PF계산 오류; [Jira 담당 이슈] HUB만 통신 중단 확인 요청
+<output>{"choice": 2}</output>
+</example>
+<example>
+인물: "고윤석"
+후보:
+1. Youngwoong Han — 문서: [Jira 담당 이슈] EMS+GEM USB업데이트 패키지 구성; [Jira 담당 이슈] Custom filed by user 기능 활성화 검토; [Jira 담당 이슈] Jira Automation Rule 적용 가능성 검토
+2. Yunseok Ko — 문서: [Jira 담당 이슈] Gen3 CI 기본 환경 설정
+<output>{"choice": null}</output>
+</example>"""
+
+
+@functools.lru_cache(maxsize=1000)
+def _person_pick_llm_call(prompt, timeout=20):
+    cmd = [
+        "claude", "-p", prompt,
+        "--output-format", "json",
+        "--system-prompt",
+        '너는 후보 번호 JSON만 출력하는 도구다. 반드시 {"choice": 번호 또는 null} '
+        "형식 하나만 출력하고, 코드펜스나 다른 설명은 절대 붙이지 마라.",
+        "--tools", "",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if result.returncode != 0:
+            return None
+        data = json.loads(result.stdout)
+        if data.get("is_error"):
+            if looks_like_usage_limit_error(data.get("result")):
+                mark_usage_exhausted(data.get("result"))
+            return None
+        raw_text = data["result"]
+        start, end = raw_text.find("{"), raw_text.rfind("}")
+        if start == -1 or end == -1 or end < start:
+            return None
+        obj = json.loads(raw_text[start:end + 1])
+        choice = obj.get("choice")
+        return int(choice) if choice is not None else None
+    except Exception:
+        return None
+
+
+def pick_person_account(name, candidates, titles_shown=4, timeout=20):
+    """candidates: [(account_id, display_name, [title, ...]), ...] — 후보가 1개뿐이든
+    여러 개든 항상 LLM에게 증거를 보여주고 실제 "name" 본인일 가능성이 가장 높은
+    (account_id, display_name)을 고른다(확신 없으면 None) — 후보가 1개일 때 판단
+    없이 그냥 채택하던 예전 지름길은 실측 사고로 폐기됨(위 모듈 주석 참고). 후보가
+    아예 없거나 claude -p 미설치/실패/판단불가 시 None을 반환한다(호출부가 안전하게
+    폴백하도록)."""
+    if not candidates:
+        return None
+    if not _claude_cli_available():
+        return None
+    lines = [
+        f'{i}. {display_name or "(이름 없음)"} — 문서: {"; ".join(titles[:titles_shown])}'
+        for i, (_, display_name, titles) in enumerate(candidates, 1)
+    ]
+    prompt = (
+        f"<instructions>\n{_PERSON_PICK_INSTRUCTIONS}\n</instructions>\n\n"
+        f"<examples>\n{_PERSON_PICK_FEWSHOT}\n</examples>\n\n"
+        f'인물: "{name}"\n후보:\n' + "\n".join(lines)
+    )
+    choice = _person_pick_llm_call(prompt, timeout)
+    if not choice or not (1 <= choice <= len(candidates)):
+        return None
+    return candidates[choice - 1][:2]

@@ -31,13 +31,18 @@ from flask import Flask, request, jsonify, send_from_directory, session, redirec
 
 sys.path.insert(0, str(Path(__file__).parent))
 from search_query_utils import _clean_query, _tech_query, _extract_terms, _KO_STOP, _apply_person_aliases  # CQL 검색어 정제용 헬퍼만 재사용 (로컬 위키 검색 자체는 미사용)
-from query_expansion import _expand_search_query  # claude -p 검색어 확장 프롬프트 엔지니어링 전담 모듈
+from query_expansion import _expand_search_query, retry_person_extraction  # claude -p 검색어 확장 프롬프트 엔지니어링 전담 모듈
+from usage_guard import (
+    is_usage_exhausted, mark_usage_exhausted, looks_like_usage_limit_error, USAGE_EXHAUSTED_MESSAGE,
+)  # claude -p 사용량 한도 소진 감지 전담 모듈
 from confluence_to_text import render as render_storage_html
 from bs4 import BeautifulSoup
 from atlassian_mcp_client import (
     rovo_search, search_by_creator, find_author_id_by_title, lookup_cached_person_in_text,
+    get_energysw_roster, _ROSTER_PAGE_TITLE,
     _EMPTY_BODY_NOTE, _confluence_space_of, CONFLUENCE_PERSONAL_SPACE_OWNERS,
 )
+from jira_client import search_jira_assigned  # Jira 연동 전담 모듈(atlassian_mcp_client.py 상단 주석 참고)
 import wiki_chat_history as chat_history
 
 BASE_DIR = Path(__file__).parent
@@ -65,6 +70,13 @@ _CQL_SPACE_CLAUSE = "space in (" + ", ".join(f'"{s}"' for s in CONFLUENCE_SPACES
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("ADMIN_SECRET_KEY") or os.urandom(32)
+
+# 화면 우상단/랜딩에 찍히는 버전 배지(2026-09-18 전엔 static/index.html에 "v1.2.2"로 하드코딩
+# 돼 있어서 배포 때마다 HTML을 직접 고쳐야 했다 — 사용자 요청으로 wikibot.env의
+# WIKIBOT_VERSION 값을 /api/whoami로 내려서 프론트가 그대로 표시하게 바꿨다. 릴리스마다
+# wikibot.env만 갱신하면 되고(코드 수정 불필요), 값이 없으면 "dev"로 표시해 로컬 개발
+# 인스턴스와 정식 배포본을 한눈에 구분할 수 있게 한다.
+WIKIBOT_VERSION = os.environ.get("WIKIBOT_VERSION", "dev")
 
 # --admin 플래그로 띄운 인스턴스는 일반 인스턴스와 같은 UI/기능을 쓰되 (1) 로그인이 걸리고
 # (2) 소프트 삭제된 대화도 필터링하지 않는다.
@@ -719,6 +731,25 @@ _GENERIC_KO_WORDS = {
     "누구야", "누구", "누군지", "누구인지",
 }
 
+# 인물 문서 "개수/전체 목록" 질문 판별(2026-09-18 추가) — "장승혁이 몇 개 썼어",
+# "정지석이 만든 문서 다 보여줘" 같은 질문은 build_context의 anchor 보강 경로를
+# 타되, 일반 인물 질문과 다르게 처리해야 한다: 답이 "예시 문서 몇 개"가 아니라
+# "정확한 개수/전체 목록" 자체이므로, 아래에서 이 정규식에 걸리면 search_by_creator
+# 의 6건 상한(예시용)을 풀고 전체를 컨텍스트에 넣는다. 사람 이름을 여기 하드코딩하지
+# 않는다 — anchor_author_id가 이미 find_author_id_by_title()/캐시로 풀린 뒤에만
+# 이 분기를 타므로, 이 정규식은 "누구를" 찾는 게 아니라 "무엇을 답해야 하는지"만
+# 판별한다.
+_PERSON_DOC_COUNT_RE = re.compile(r"몇\s*(개|건|페이지|문서)|얼마나\s*(많이|많은)")
+_PERSON_DOC_LISTALL_RE = re.compile(r"(다|전부|모두)\s*(찾아|보여|알려|줘)")
+
+# 인물 "Jira 티켓" 질문 판별(2026-09-18 추가, 사용자 요청: "Jira 티켓도
+# 연동할수있어? 심철로 할당된 jira 티켓 찾아줘"). "jira"/"지라"라는 단어 자체가
+# 이미 충분히 구체적인 고유명사라(흔한 한글 조사/명사와 겹칠 일이 없음) "티켓"/
+# "이슈"와 함께 나오면 오탐 위험 없이 바로 의도를 판별할 수 있다 — 위 개수/목록
+# 정규식과 달리 사람 이름을 오인할 여지 있는 일반 명사가 아니므로 정규식으로도
+# 안전하다.
+_JIRA_TICKET_RE = re.compile(r"(jira|지라)", re.IGNORECASE)
+
 
 def _rovo_search_query(query, extra_terms=None):
     """Rovo Search는 짧은 키워드 질의에서 훨씬 정확함(실측: "Advanced TOU 로직"은
@@ -777,8 +808,11 @@ def build_context(question, history=None):
     # 호출 — 지연 추가 없음)이 "core"(문법적 잡음만 제거한 신뢰 가능한 원본 검색어)와
     # "keywords"(동의어/표기 변형 포함 보완 검색어)를 한 번에 뽑게 구조를 바꿨다
     # (query_expansion.py의 _INSTRUCTIONS/_FEWSHOT_EXAMPLES 참고). claude -p 실패 시
-    # (question, question)으로 폴백하므로 아래 로직은 항상 안전하게 동작한다.
-    original_query, expanded_keywords = _expand_search_query(question, history)
+    # (question, question, None)으로 폴백하므로 아래 로직은 항상 안전하게 동작한다.
+    # 세 번째 값 expanded_person은 질문이 특정 인물 한 명을 콕 집어 물을 때만
+    # 그 이름이 채워진다 — 아래 anchor 보강 분기(person_name_candidates 정규식이
+    # 있던 자리)에서 쓴다.
+    original_query, expanded_keywords, expanded_person = _expand_search_query(question, history)
     # claude -p는 같은 지시에도 매번 똑같이 순종하지 않는다(샘플링 비결정성, 위
     # _expand_search_query_llm_call 주석 참고) — 실측: "장승혁 프로가 누구야"를 여러 번
     # 물으면 대부분 core="장승혁"으로 깨끗하게 나오지만, 가끔 "장승혁 프로가 누구야"를
@@ -803,6 +837,8 @@ def build_context(question, history=None):
     # 추가한다(2026-08-19, "gem net id" 케이스로 재현/수정).
     live_pages = rovo_search(original_query, limit=3)
     using_rovo = bool(live_pages)
+    for p in live_pages:
+        p["source"] = "rovo"
 
     if using_rovo and expanded_keywords.strip() != original_query.strip():
         expanded_pages = rovo_search(
@@ -811,6 +847,7 @@ def build_context(question, history=None):
         seen_urls = {p["url"] for p in live_pages}
         for p in expanded_pages:
             if p["url"] not in seen_urls:
+                p["source"] = "rovo"
                 live_pages.append(p)
                 seen_urls.add(p["url"])
 
@@ -854,32 +891,190 @@ def build_context(question, history=None):
     cached = lookup_cached_person_in_text(question) or lookup_cached_person_in_text(expanded_keywords)
     if cached:
         anchor_author_id, anchor_author_name = cached
+    elif expanded_person:
+        # 예전엔 여기서 "원본/확장 검색어 중 한글 2~4음절 토큰"을 전부 사람 이름
+        # 후보로 취급해 순서대로 find_author_id_by_title()에 넣어봤는데, "파트"/
+        # "인원"/"생성"/"작성" 같은 흔한 명사까지 그 정규식(re.fullmatch(r"[가-힣]
+        # {2,4}"))에 걸려서 완전히 무관한 사람이 anchor로 잡히는 사고가 실측됨
+        # (2026-09-18: "EnergySW 파트 인원을 한정하여 각각의 인원이 얼마나 많은
+        # page를 생성했는지" 질문에서 첫 후보였던 "파트"가 "OOO 파트 업무
+        # 진행사항" 문서를 여러 건 쓴 다른 팀 사람에게 우연히 매칭되어, 질문과
+        # 전혀 상관없는 그 사람의 문서 200건이 통째로 답변 컨텍스트에 실림 —
+        # 사용자가 "왜 상관없는 OOO님이 답변으로 나오지?"로 재현). 이제는 질문에
+        # 실제로 특정 인물 한 명이 지목됐는지 자체를 이미 하고 있던 검색어 확장
+        # LLM 호출의 "person" 필드로 판별한다(query_expansion.py 참고) — 질문이
+        # "EnergySW 인원 전체" 같은 그룹을 묻거나 사람 이름이 아예 없으면 그
+        # 호출이 person을 null로 주므로, 여기 elif 자체를 안 타서 anchor 오염이
+        # 구조적으로 불가능해진다.
+        anchor_author_id, anchor_author_name = find_author_id_by_title(expanded_person)
+        if not anchor_author_id:
+            # person 필드에 조사가 안 떨어진 채로 나온 경우 대비 재시도(2026-09-18,
+            # 사용자 실측: "심철로된 jira티켓 검색..."을 5번 돌리면 1번꼴로
+            # person="심철로"(조사 "로" 미제거)가 나와 계정을 못 찾았음 — "오타
+            # 아닌데"로 재현됨). 정규식으로 조사를 떼는 안전망은 "지은"/"수은"처럼
+            # 실제 이름과 겹치는 조사가 많아 사용자가 반려했다("하드코딩하지말고
+            # 프롬프트엔지니어링을... 라이브러리있니?") — 대신 같은 claude -p를
+            # 캐시 우회해서 한 번 더 불러 새 샘플을 받는다(retry_person_extraction()
+            # 독스트링 참고). 실패가 흔치 않은 경로에서만 도는 재시도라 평소
+            # 지연에는 영향 없음.
+            retried_person = retry_person_extraction(question, history)
+            if retried_person and retried_person != expanded_person:
+                anchor_author_id, anchor_author_name = find_author_id_by_title(retried_person)
     else:
         anchor_author_id = anchor_author_name = None
-        person_name_candidates = [
-            t for t in original_terms + expanded_keywords.split()
-            if re.fullmatch(r"[가-힣]{2,4}", t)
-        ]
-        for name in person_name_candidates:
-            anchor_author_id, anchor_author_name = find_author_id_by_title(name)
-            if anchor_author_id:
-                break
 
+    person_count_note = None  # wants_full_list일 때만 채워짐, parts에 별도로 붙임(아래 참고)
     if anchor_author_id:
-        author_pages, author_display_name = search_by_creator(anchor_author_id, limit=10)
-        author_display_name = author_display_name or anchor_author_name
-        seen_urls = {p["url"] for p in live_pages}
-        added = 0
-        for p in author_pages:
-            if p["url"] in seen_urls:
-                continue
-            if author_display_name:
-                p["author_display_name"] = author_display_name
-            live_pages.append(p)
-            seen_urls.add(p["url"])
-            added += 1
-            if added >= 6:  # 발췌만 쓰지만 소스 목록이 너무 길어지지 않게 상한
-                break
+        # "심철로 할당된 jira 티켓 찾아줘"(사용자 요청, 2026-09-18: "Jira 티켓도
+        # 연동할수있어?") 같은 질문은 Confluence 문서 개수/목록 질문과 완전히
+        # 다른 데이터 소스가 필요하다 — search_jira_assigned()는 assignee 필드로
+        # "정확히" 매칭하므로(search_jira_mentions()의 text~ 다수결/LLM 판단과
+        # 달리) anchor_author_id만 맞으면 그대로 신뢰할 수 있다. Confluence
+        # 개수/목록 로직과 섞이지 않게 먼저 분기해서 처리하고 아래로 안 내려간다.
+        wants_jira_tickets = bool(_JIRA_TICKET_RE.search(question)) and (
+            "티켓" in question or "이슈" in question
+        )
+        if wants_jira_tickets:
+            tickets, is_complete = search_jira_assigned(anchor_author_id)
+            display_name = anchor_author_name
+            note = (
+                f"[참고: Jira에서 {display_name or '이 인물'}님에게 assignee로 할당된 "
+                f"이슈 중 완료(Done)·취소(Cancelled)를 뺀 진행 중인 이슈를 우선순위 "
+                f"높은 순 → 마감일 이른 순으로 정렬해 검색한 결과 {len(tickets)}건이 "
+                f"확인되었습니다."
+            )
+            if not is_complete:
+                note += " 결과가 한 번에 가져올 수 있는 상한에 걸려, 실제로는 이보다 더 있을 수 있는 최소값입니다."
+            note += (
+                " 완료/취소된 과거 이슈는 이 집계에서 의도적으로 제외했습니다(전체 "
+                "이력이 필요하면 별도로 말씀해 주세요를 답변에 덧붙이세요). "
+                "답변할 때 이 개수와 아래 목록(우선순위·마감일 포함)을 그대로 쓰세요.]"
+            )
+            person_count_note = note
+            seen_urls = {p["url"] for p in live_pages}
+            for t in tickets:
+                if t["url"] in seen_urls:
+                    continue
+                detail_bits = [b for b in [
+                    f"우선순위: {t['priority']}" if t["priority"] else "",
+                    f"마감일: {t['duedate']}" if t["duedate"] else "",
+                    f"상태: {t['status']}" if t["status"] else "",
+                ] if b]
+                live_pages.append({
+                    "title": f"[{t['key']}] {t['title']}",
+                    "url": t["url"],
+                    "text": " / ".join(detail_bits),
+                    "type": "issue",
+                    "author_display_name": display_name,
+                    "source": "jira_assigned",
+                })
+                seen_urls.add(t["url"])
+        else:
+            # "장승혁이 만든 문서 다 보여줘" / "장승혁이 몇 개 썼어" 같은 질문은
+            # 일반 인물 질문과 다르게 취급해야 한다 — 위 anchor 보강은 답변에
+            # 곁들일 예시 문서 몇 개를 찾는 용도라 6건에서 끊지만(added >= 6), 이
+            # 질문들은 "개수/전체 목록" 자체가 답이라 6건 상한을 걸면 답이 틀린다
+            # (실측: EnergySW 스페이스에서 상위 작성자는 개인당 페이지가 수백
+            # 건까지 나옴, 2026-09-18 전수조사로 확인). search_by_creator의 CQL
+            # 총량은 200건에서 하드 컷되므로(atlassian_mcp_client.py의
+            # search_by_creator 문서 참고) "정확한 개수"가 아니라 "최소 이만큼"
+            # 으로만 말할 수 있는 경우가 있다 — 200건을 다 채워서 돌아오면 그
+            # 사실을 답변에 명시하게 한다.
+            wants_full_list = bool(
+                _PERSON_DOC_COUNT_RE.search(question) or _PERSON_DOC_LISTALL_RE.search(question)
+            )
+            creator_limit = 200 if wants_full_list else 10
+            author_pages, author_display_name = search_by_creator(anchor_author_id, limit=creator_limit)
+            author_display_name = author_display_name or anchor_author_name
+            seen_urls = {p["url"] for p in live_pages}
+
+            if wants_full_list:
+                truncated = len(author_pages) >= creator_limit
+                count_note = (
+                    f"[참고: Confluence에서 {author_display_name or anchor_author_name}님이 "
+                    f"작성(creator)한 문서를 CQL로 전수 검색한 결과 {len(author_pages)}건이 "
+                    f"확인되었습니다."
+                )
+                if truncated:
+                    count_note += (
+                        " Confluence 검색 API가 결과를 200건에서 잘라 반환하는 한계가 있어, "
+                        "실제로는 이보다 더 많을 수 있는 최소값입니다."
+                    )
+                count_note += " 답변할 때 이 숫자를 그대로 쓰고, 목록도 아래 출처를 근거로 답하세요.]"
+                # live_pages에 안 넣고 따로 들고 있다가 parts에만 붙인다(아래 return
+                # 직전) — live_pages는 sources(UI에 노출되는 출처 카드 목록)도 같이
+                # 만드는데, 이 메모는 실제 문서가 아니라 URL이 없어서 sources에
+                # 섞이면 빈 링크 카드가 뜬다.
+                person_count_note = count_note
+                for p in author_pages:  # 목록/개수 질문이므로 6건 상한 없이 전부 포함
+                    if p["url"] in seen_urls:
+                        continue
+                    if author_display_name:
+                        p["author_display_name"] = author_display_name
+                    # 최대 200건까지 들어올 수 있어 excerpt까지 다 넣으면 컨텍스트가
+                    # 너무 커진다 — 이 분기는 "개수/목록"이 목적이라 제목+URL만으로
+                    # 충분하므로 본문 발췌는 비운다.
+                    p["text"] = ""
+                    p["source"] = "confluence_cql"
+                    live_pages.append(p)
+                    seen_urls.add(p["url"])
+            else:
+                added = 0
+                for p in author_pages:
+                    if p["url"] in seen_urls:
+                        continue
+                    if author_display_name:
+                        p["author_display_name"] = author_display_name
+                    p["source"] = "confluence_cql"
+                    live_pages.append(p)
+                    seen_urls.add(p["url"])
+                    added += 1
+                    if added >= 6:  # 발췌만 쓰지만 소스 목록이 너무 길어지지 않게 상한
+                        break
+    elif _PERSON_DOC_COUNT_RE.search(question) or _PERSON_DOC_LISTALL_RE.search(question):
+        # anchor_author_id가 없다는 건(위 elif expanded_person 분기를 안 탔다는 뜻)
+        # 질문이 특정 인물 한 명을 지목한 게 아니라는 뜻인데(query_expansion.py의
+        # person 필드가 null), 그런데도 "몇 개/다 보여줘" 같은 개수·목록 의도는
+        # 감지됐다 — "EnergySW 파트 인원을 한정하여 각각의 인원이 얼마나 많은
+        # page를 생성했는지"처럼 특정 인물이 아니라 "우리 팀 전체 각자"를 묻는
+        # 질문이 정확히 이 조합이다(사용자가 이전 답변에 "이게 맞는 답이라고
+        # 생각하니?"로 지적, 2026-09-18 — 그때는 이 elif 자체가 없어서 "한 명씩
+        # 물어보세요"로만 답했었음). 이 위키봇이 다루는 유일한 "팀 전체"가
+        # EnergySW 파트이므로, Confluence 명단 문서에서 실시간으로 읽은 이름들을
+        # 한 명씩 순회하며 집계한다 — 이름을 코드에 하드코딩하지 않는다
+        # (get_energysw_roster() 독스트링 참고).
+        #
+        # 인원 수만큼 순차로 Confluence를 호출해야 해서 수십 초~분 단위로 느리다
+        # (ThreadPoolExecutor 병렬화는 과거에 동일 세션 동시요청이 응답을 뒤섞는
+        # 사고를 낸 전례가 있어 일부러 안 씀 — atlassian_mcp_client.py의
+        # search_confluence_live 근처 주석 참고: "인원/조직 데이터처럼 실수가
+        # 그대로 신뢰 문제로 이어지는 내용을 다루므로... 정확성이 우선". 같은
+        # 원칙이 여기 인원별 집계에도 그대로 적용된다).
+        roster = get_energysw_roster()
+        if roster:
+            rows = []
+            for person_name in roster:
+                pid, pdisplay = find_author_id_by_title(person_name)
+                if not pid:
+                    rows.append((person_name, None, 0))
+                    continue
+                ppages, pdisp2 = search_by_creator(pid, limit=200)
+                rows.append((pdisp2 or pdisplay or person_name, len(ppages), len(ppages) >= 200))
+            rows.sort(key=lambda r: -(r[1] or 0))  # 계정 못 찾은 사람(count=None)은 0 취급으로 뒤로
+            lines = []
+            for row in rows:
+                if row[1] is None:
+                    lines.append(f"- {row[0]}: 계정을 찾지 못해 확인 불가")
+                    continue
+                name_shown, cnt, trunc = row
+                lines.append(f"- {name_shown}: {cnt}건" + ("(200건 상한 도달, 하한선)" if trunc else ""))
+            person_count_note = (
+                f'[참고: Confluence "{_ROSTER_PAGE_TITLE}" 명단({len(roster)}명) 기준으로, '
+                "각자가 creator인 Confluence 문서를 CQL로 한 명씩 전수 검색한 결과입니다 "
+                "(CQL 특성상 200건에서 잘리므로 그 값이 찍힌 사람은 정확한 개수가 아니라 "
+                "최소값). 답변할 때 이 목록을 표/불릿으로 그대로 옮기고 숫자를 새로 세거나 "
+                "바꾸지 마세요.]\n" + "\n".join(lines)
+            )
 
     # 본문이 진짜로 비어있는 페이지(다이어그램/엑셀 첨부파일만 있음)는 원본 첨부파일을
     # 직접 파싱해서 보완한다(_fetch_attachment_text 참고, 사용자 확정 2026-08-12).
@@ -909,30 +1104,67 @@ def build_context(question, history=None):
                 f"내용입니다. {caveat})\n" + extracted_text
             )
 
-    if not using_rovo:
+    if not using_rovo and not live_pages:
+        # `and not live_pages` 추가(2026-09-18) — 원래 `using_rovo`만 보고 폴백하면,
+        # 위 인물 anchor 보강(search_by_creator)이 뭔가를 이미 채워 넣은 뒤라도
+        # live_pages를 통째로 CQL 폴백 결과로 덮어써서 애써 찾은 인물 문서가 전부
+        # 날아간다 — 실측: "정지석이 몇 개 문서 썼어"처럼 사람+개수 질문은 원본
+        # 문장 그대로 rovo_search(original_query)를 돌리면(맨 위 live_pages 초기화
+        # 지점) 텍스트 매칭할 본문 키워드가 없어 0건이 나오기 쉬워(using_rovo=False)
+        # 이 경로를 그대로 타는데, 그 시점엔 이미 anchor 보강으로 author_pages가
+        # live_pages에 들어가 있는 상태라 여기서 지워버리면 개수/목록 답변 자체가
+        # 통째로 사라진다. `using_rovo`가 원래 의도한 건 "Rovo/MCP 자체가 아예
+        # 실패했을 때"의 폴백이므로(2026-08-19 주석 참고), 이미 뭔가 채워진
+        # live_pages는 안 건드리는 게 맞다.
         # 스페이스를 7개로 넓힌 뒤로 동일 키워드 매치 건수가 훨씬 많아져서(예: "TOU" 20+건)
         # limit=3이면 진짜 관련 문서가 순위 밖으로 밀릴 위험이 커짐 -> 여유 있게 5개
         live_pages = search_confluence_live(expanded_keywords, limit=5)
+        for p in live_pages:
+            p["source"] = "confluence_cql"
 
     parts = []
     sources = []
 
+    # 소스 라벨을 item마다 정확히 표시한다(2026-09-18 수정) — 예전엔 이 요청
+    # 전체가 Rovo Search를 한 번이라도 썼는지(using_rovo, 요청당 값 1개)만 보고
+    # "모든" 항목에 똑같이 "(live, Rovo Search)"를 붙였다. 그런데 anchor 보강
+    # (search_by_creator, CQL)이나 Jira 할당 이슈(search_jira_assigned)로 채워진
+    # 항목은 실제로 Rovo Search를 거치지 않았는데도 라벨만 "Rovo Search"로 찍혀서
+    # 사용자가 "심철로 할당된 jira 티켓 찾아줘" 결과를 보고 출처 표기가 이상하다고
+    # 지적함. 이제 각 항목을 live_pages에 넣는 시점에 `p["source"]`를 직접 붙이고
+    # (rovo/confluence_cql/jira_assigned), 여기서는 그 값만 보고 라벨을 고른다 —
+    # source가 없는 항목(예전 경로가 누락했을 가능성 대비)은 using_rovo로 안전하게
+    # 폴백한다.
+    _SOURCE_LABELS = {
+        "rovo": "Rovo Search",
+        "confluence_cql": "CQL 작성자 검색",
+        "jira_assigned": "Jira 담당자 검색",
+    }
     for p in live_pages:
-        kind = "Jira" if p.get("type") == "issue" else "Confluence"
-        label_type = "jira" if p.get("type") == "issue" else "confluence"
+        is_issue = p.get("type") == "issue"
+        kind = "Jira" if is_issue else "Confluence"
+        label_type = "jira" if is_issue else "confluence"
         owner = CONFLUENCE_PERSONAL_SPACE_OWNERS.get(_confluence_space_of(p.get("url")))
         author_name = p.get("author_display_name")
         if owner:
             owner_note = f", {owner}님의 개인 Confluence 스페이스 문서"
+        elif author_name and is_issue:
+            # search_jira_assigned()로 채워진 이슈 — "작성한 문서"가 아니라
+            # "할당된 이슈"이므로 문구를 구분한다(2026-09-18).
+            owner_note = f", {author_name}님에게 할당된 이슈"
         elif author_name:
             # search_by_creator()로 보강된 문서 — 발췌만 있어 본문이 짧을 수 있으니
             # 모델이 "이 사람이 작성한 문서"라는 맥락을 놓치지 않게 명시(2026-09-17).
             owner_note = f", {author_name}님이 작성한 문서(짧은 발췌)"
         else:
             owner_note = ""
-        parts.append(f"[출처: {kind}(live, Rovo Search{owner_note}) - {p['title']} | URL: {p['url']}]\n{p['text']}"
-                     if using_rovo else f"[출처: Confluence(live{owner_note}) - {p['title']} | URL: {p['url']}]\n{p['text']}")
+        source_label = _SOURCE_LABELS.get(p.get("source")) or ("Rovo Search" if using_rovo else None)
+        source_tag = f"live, {source_label}" if source_label else "live"
+        parts.append(f"[출처: {kind}({source_tag}{owner_note}) - {p['title']} | URL: {p['url']}]\n{p['text']}")
         sources.append({"type": label_type, "label": p["title"], "url": p["url"]})
+
+    if person_count_note:
+        parts.append(person_count_note)
 
     return "\n\n---\n\n".join(parts), sources
 
@@ -1047,6 +1279,8 @@ def call_claude_cli(history, context, timeout=180):
         raise RuntimeError(f"claude CLI exit={result.returncode}: {result.stderr[:500]}")
     data = json.loads(result.stdout)
     if data.get("is_error"):
+        if looks_like_usage_limit_error(data.get("result")):
+            mark_usage_exhausted(data.get("result"))
         raise RuntimeError(f"claude CLI error: {data.get('result')}")
     return data["result"]
 
@@ -1141,6 +1375,15 @@ def chat():
         conversation_id = chat_history.create_conversation(history[-1]["content"])
     if not retry:
         chat_history.add_message(conversation_id, "user", history[-1]["content"])
+
+    # 사용량 한도 초과 상태면 검색/답변 생성(둘 다 claude -p 필요)을 아예 시도하지
+    # 않고 바로 고정 메시지로 응답한다(사용자 요청, 2026-09-18) — build_context도
+    # 검색어 확장/인물 판별에 claude -p를 쓰므로 여기서 걸러야 검색 자체가
+    # "비활성화"된다. usage_guard.py 모듈 독스트링 참고: 정확한 잔여 % 조회는
+    # 불가능해서, 실제 실패를 감지한 뒤 쿨다운 동안만 이렇게 막는 반응형 방식이다.
+    if is_usage_exhausted():
+        chat_history.add_message(conversation_id, "assistant", USAGE_EXHAUSTED_MESSAGE, [])
+        return jsonify({"answer": USAGE_EXHAUSTED_MESSAGE, "sources": [], "conversation_id": conversation_id})
 
     search_query = _build_search_query(history)
     context, sources = build_context(search_query, history)
@@ -1289,7 +1532,7 @@ def health():
 
 @app.route("/api/whoami")
 def whoami():
-    return jsonify({"admin": bool(ADMIN_MODE)})
+    return jsonify({"admin": bool(ADMIN_MODE), "version": WIKIBOT_VERSION})
 
 
 def main():

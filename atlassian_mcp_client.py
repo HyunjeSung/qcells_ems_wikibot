@@ -10,6 +10,11 @@ Rovo Search는 Atlassian 자체 검색 엔진이라 우리가 CQL로 직접 짠 
 주의: refresh_token은 1회용(rotation)이라, Claude Code 본인 세션과 이 클라이언트가
 서로 다른 토큰을 들고 있으면 한쪽이 갱신할 때 다른 쪽 토큰이 무효화된다. 그래서
 항상 같은 credentials.json 파일을 읽고 갱신 결과를 그 자리에 다시 써서 공유한다.
+
+Jira 전용 기능(이름→계정 역추적, 담당 이슈 조회 등)은 jira_client.py로 분리돼
+있다(2026-09-18) — 이 파일은 토큰/세션 저수준 배관 + Confluence 검색이 본진이고,
+jira_client.py가 이 파일의 _get_access_token/_start_session/_call_tool_in_session/
+_tool_text_payload/SITE_URL을 가져다 쓴다.
 """
 
 import itertools
@@ -21,6 +26,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+from query_expansion import pick_person_account
 
 # 예전에 getConfluencePage fetch를 ThreadPoolExecutor로 병렬화했다가 동시 요청 간 응답이
 # 뒤섞이는 사고가 나서 순차 방식으로 되돌렸다(rovo_search 안 주석 참고). 요청 id를 고유값으로
@@ -675,24 +682,51 @@ def lookup_cached_person_in_text(text):
 
 
 def find_author_id_by_title(name, limit=10, timeout=20):
-    """제목에 name(한글 이름 등)이 들어간 Confluence 페이지를 CQL로 찾아 그 작성자
-    accountId를 반환한다 — (author_id, author_name) 또는 실패/미발견 시 (None, None).
+    """name(한글 이름 등)의 Confluence 작성자 accountId를 찾는다 — (author_id,
+    author_name) 또는 실패/미발견 시 (None, None).
 
-    같은 이름이 제목에 있어도 실제 작성자(creator)는 다를 수 있다(실측: "(장승혁,
-    김다빈) Energy Flow 디자인 등록 출원"과 "(장승혁, 서국영) ... 디자인 등록 출원"
-    둘 다 creator가 장승혁이 아니라 이재형(jaehyeong.lee) — 특허 출원 문서를 대리로
-    작성한 사람으로 추정, 발명자 이름만 제목에 공동으로 올라간 것이었음. 반면
-    "(장승혁) 모니터링 시스템..."처럼 그 사람 **단독**으로 괄호 안에 표기된 문서는
-    실제로 본인이 creator였음.
-    **다수결은 틀렸다**(첫 구현, 실측으로 반증됨) — 이번 예시에서 공동 표기 문서
-    2건(이재형) vs 단독 표기 문서 1건(장승혁 본인)이라 다수결이 이재형을 잘못
-    채택했다(사용자가 "Jack Jang으로 작성된 문서를 찾아줘"가 빈손으로 돌아오는
-    것으로 재현시킴, 2026-09-17). 그래서 제목의 맨 앞 괄호 그룹을 콤마로 나눠서
-    **그 이름 "단독"으로만 표기된 문서를 우선** 채택하고(더 신뢰할 수 있는 신호),
-    단독 표기 후보가 하나도 없을 때만 다수결로 폴백한다."""
+    1순위: lookup_person_account_id()로 Atlassian 사용자 디렉터리에서 정확히
+    1명이 찾아지면 그걸 바로 채택한다(가장 신뢰할 수 있는 신호 — 위 독스트링
+    참고). 디렉터리에서 못 찾으면(0건, 흔함) 아래 2순위로 넘어간다.
+
+    2순위: 제목에 name이 들어간 Confluence 페이지를 CQL로 찾아 그 작성자들 중
+    실제 본인일 가능성이 가장 높은 계정을 고른다. 같은 이름이 제목에 있어도 실제
+    작성자(creator)는 다를 수 있다(실측: "(장승혁, 김다빈) Energy Flow 디자인
+    등록 출원"과 "(장승혁, 서국영) ... 디자인 등록 출원" 둘 다 creator가 장승혁이
+    아니라 이재형 — 특허 출원 문서를 대리로 작성한 사람으로 추정, 발명자 이름만
+    제목에 공동으로 올라간 것이었음. 반면 "(장승혁) 모니터링 시스템..."처럼 그
+    사람 **단독**으로 괄호 안에 표기된 문서는 실제로 본인이 creator였음). 제목의
+    맨 앞 괄호 그룹을 콤마로 나눠서 **그 이름 "단독"으로만 표기된 문서를 우선**
+    채택하고(가장 신뢰할 수 있는 신호, 2026-09-17 "Jack Jang" 사고로 도입), 단독
+    표기 후보가 없으면 나머지 후보들을 query_expansion.pick_person_account()로
+    LLM 판단에 맡긴다 — 예전엔 여기서 "가장 많이 매칭된 계정"을 다수결로 그냥
+    채택했는데, 실측으로 이 다수결 자체가 틀렸다(2026-09-18, "정지석"이 무관한
+    사람에게 잘못 채택된 사고, 위 독스트링 참고) — 사용자가 "사람이름에 대해
+    하드코딩된 키워드 사용하지말고, llm으로 추론할수있어?"로 명시적으로 요청.
+
+    3순위(같은 LLM 판단에 합쳐서 반영): search_jira_mentions()으로 Jira 이슈
+    본문/댓글까지 검색한 결과도 같은 후보 풀에 섞는다 — Confluence 제목검색은
+    "그 이름이 제목에 박힌 문서"가 없으면 아예 후보가 안 나오는데, Jira는 본문·
+    댓글까지 훑어서 그런 사람도 상당수 메워준다(사용자 제안, 2026-09-18). 이것도
+    다수결로 바로 못 믿는다(실측: "고윤석" 검색은 assignee 1위가 본인이 아니라
+    다른 사람이었음 — search_jira_mentions() 독스트링 참고) — 그래서 Confluence
+    증거와 Jira 증거를 한 후보 풀로 합쳐 pick_person_account() LLM 판단 한 번에
+    같이 넘긴다."""
+    # 함수 안에서 import하는 이유: jira_client.py가 이 파일의 _get_access_token 등
+    # 저수준 세션 함수를 가져다 쓰므로(jira_client.py 상단 참고), 모듈 최상단에서
+    # 서로를 import하면 순환 임포트가 된다. 이 함수가 실제로 호출되는 시점엔 두
+    # 모듈 다 이미 로드가 끝나 있으므로 지연 import로 순환을 피한다.
+    from jira_client import lookup_person_account_id, search_jira_mentions
+
     cached = lookup_cached_person(name)
     if cached:
         return cached
+
+    directory_hits = lookup_person_account_id(name, timeout=timeout)
+    if len(directory_hits) == 1:
+        account_id, display_name = directory_hits[0]
+        _remember_person(account_id, display_name, name)
+        return account_id, display_name
 
     try:
         token = _get_access_token()
@@ -711,8 +745,8 @@ def find_author_id_by_title(name, limit=10, timeout=20):
 
     payload = _tool_text_payload(result)
     raw_results = payload.get("results", []) if isinstance(payload, dict) else []
-    counts = {}
     names = {}
+    evidence_by_account = {}
     for r in raw_results:
         created_by = r.get("content", {}).get("history", {}).get("createdBy", {}) or {}
         account_id = created_by.get("accountId")
@@ -725,19 +759,35 @@ def find_author_id_by_title(name, limit=10, timeout=20):
             paren_names = [p.strip() for p in re.split(r"[,、]", m.group(1)) if p.strip()]
             if paren_names == [name]:
                 # 맨 앞 괄호가 정확히 이 이름 하나만 담고 있음 — 단독 표기, 가장
-                # 신뢰할 수 있는 신호이므로 다수결을 거치지 않고 바로 채택한다.
+                # 신뢰할 수 있는 신호이므로 LLM 판단 없이 바로 채택한다.
                 display_name = created_by.get("displayName")
                 _remember_person(account_id, display_name, name)
                 return account_id, display_name
 
-        counts[account_id] = counts.get(account_id, 0) + 1
         names[account_id] = created_by.get("displayName")
-    if not counts:
+        evidence_by_account.setdefault(account_id, []).append(f"[Confluence 제목] {title}")
+
+    # Confluence 제목검색이 못 찾거나 약한 증거만 준 사람을 위해 Jira 신호도 같은
+    # 후보 풀에 합친다(search_jira_mentions() 독스트링 참고, 사용자 제안으로
+    # 2026-09-18 추가) — 두 출처를 분리해서 따로 LLM에 두 번 묻지 않고 한 번에
+    # 합쳐서 묻는다: 어차피 최종 판단 기준(단독 표기=강한 증거, 다수결/빈도=약한
+    # 증거)은 출처와 무관하게 동일하고, 같은 계정이 두 출처 모두에서 나오면 그
+    # 자체가 LLM에게 유용한 보강 신호가 된다.
+    for account_id, display_name, summaries in search_jira_mentions(name, timeout=timeout):
+        names.setdefault(account_id, display_name)
+        evidence_by_account.setdefault(account_id, [])
+        for s in summaries:
+            evidence_by_account[account_id].append(f"[Jira 담당 이슈] {s}")
+
+    if not names:
         return None, None
-    best = max(counts, key=counts.get)
-    best_name = names.get(best)
-    _remember_person(best, best_name, name)
-    return best, best_name
+    candidates = [(aid, names[aid], evidence_by_account[aid]) for aid in names]
+    picked = pick_person_account(name, candidates, timeout=timeout)
+    if not picked:
+        return None, None
+    account_id, display_name = picked
+    _remember_person(account_id, display_name, name)
+    return account_id, display_name
 
 
 def search_by_creator(author_id, limit=10, timeout=20):
@@ -749,6 +799,20 @@ def search_by_creator(author_id, limit=10, timeout=20):
     있다(실측: "장승혁" 계정으로 전체 검색하니 예산 품의서/JWG 미팅록/연구소 소개
     문서 등 50건 — 사용자가 "confluence에서 작성자 이름에서 못찾니?"라고 직접 지적,
     2026-09-17).
+
+    limit은 200을 넘겨도 소용없다 — Confluence의 classic CQL search 엔드포인트는
+    실제 매치 건수와 무관하게 결과를 200건에서 하드 컷하고(cursor도 안 내려줌),
+    limit=250을 요청해도 totalCount가 200에서 그대로 잘리는 걸 직접 확인함(2026-09-18,
+    growingenergylabs.atlassian.net EnergySW 스페이스 3,468건 전수조사 중 재현 —
+    CQL 총량 집계는 200에서 끊겼고, 실제 전체 개수는 REST v2
+    `/spaces/{id}/pages` cursor 페이지네이션으로 별도 확인함). 그래서 이 함수로
+    "정확한 총 개수"를 구할 수 있는 건 200건 미만인 사람뿐이고, 200건을 다 채워서
+    돌아오면 그건 정확한 값이 아니라 하한선이다 — 호출부(build_context의 인물
+    문서 전체/개수 질문 분기)에서 `len(items) >= limit`이면 그 사실을 답변에
+    명시하게 하고 있음. 정말 200건을 넘는 사람의 정확한 개수가 필요하면 이 함수가
+    아니라 스페이스 전수조사(getPagesInConfluenceSpace cursor 순회)가 필요한데,
+    그건 스페이스당 수천 건이라 채팅 응답 시간 안에는 못 돌려서 별도 배치로 빼야
+    한다.
 
     getConfluencePage 전체 fetch 대신 CQL 검색 결과의 excerpt(짧은 발췌)만 쓴다 —
     "이 사람이 뭘 다뤘는지"를 넓게 훑는 용도라 문서 개수가 많을 수 있는데, 개수만큼
@@ -791,6 +855,73 @@ def search_by_creator(author_id, limit=10, timeout=20):
             "author_id": author_id,
         })
     return items, author_name
+
+
+# "정지석이 몇 개 썼어"처럼 특정 인물 한 명은 find_author_id_by_title() +
+# search_by_creator()로 풀리지만, "EnergySW 파트 인원 전체가 각각 몇 개씩
+# 썼는지"처럼 특정 인물이 아예 지목되지 않는 질문(query_expansion.py의 person
+# 필드가 null)은 그 둘만으론 답이 안 나온다 — 누구누구를 셀지 자체가 없기
+# 때문이다(사용자가 이 질문에 위키봇이 "한 명씩 물어봐"로만 답하는 걸 보고
+# "이게 맞는 답이라고 생각하니?"로 지적, 2026-09-18). 이름 목록을 코드에
+# 하드코딩하는 대신, 실제로 이 팀이 관리하는 명단 문서(Confluence
+# "Energy SW 자격 역량 대장")에서 매번 실시간으로 읽어온다 — 사람이 들고나도
+# 코드를 안 고쳐도 되고, "이름을 하드코딩하지 말라"는 같은 원칙을 인물 단위뿐
+# 아니라 명단 단위에도 적용한 것.
+_ROSTER_PAGE_TITLE = "Energy SW 자격 역량 대장"
+
+
+def get_energysw_roster(timeout=15):
+    """Confluence "Energy SW 자격 역량 대장" 문서의 표에서 "이름" 열을 파싱해
+    이름 리스트를 반환한다(중복 제거, 등장 순서 유지) — 실패/미발견 시 빈 리스트.
+
+    페이지 ID를 하드코딩하지 않고 매번 제목으로 CQL 검색해서 찾는다 — 문서가
+    재생성되거나 옮겨져도(실제로 이 문서가 2025-09-12 스페이스 재생성 이후
+    ID가 바뀐 적 있음, 스페이스 메타데이터 참고) 코드 수정 없이 따라간다.
+
+    표 헤더 행에서 "이름"이 몇 번째 열인지부터 찾아서 그 열만 뽑는다(고정
+    인덱스로 하드코딩하지 않음 — 표에 열이 추가/재배열돼도 안전)."""
+    try:
+        token = _get_access_token()
+        session_id = _start_session(token)
+        result = _call_tool_in_session(token, session_id, "searchConfluenceUsingCql", {
+            "cloudId": SITE_URL,
+            "cql": f'title ~ "{_ROSTER_PAGE_TITLE}" AND type = page',
+            "limit": 1,
+        })
+        payload = _tool_text_payload(result)
+        hits = payload.get("results", []) if isinstance(payload, dict) else []
+        if not hits:
+            return []
+        page_id = hits[0].get("content", {}).get("id")
+        if not page_id:
+            return []
+        _, _, body = _fetch_confluence_page_by_id(token, session_id, page_id, max_chars=20000)
+    except Exception as e:
+        import sys
+        print(f"⚠️  Energy SW 명단 문서 조회 실패: {e}", file=sys.stderr)
+        return []
+    if not body:
+        return []
+
+    name_col = None
+    names = []
+    for line in body.splitlines():
+        line = line.strip()
+        if not line.startswith("|"):
+            continue
+        cols = [c.strip().strip("*").strip() for c in line.strip("|").split("|")]
+        if name_col is None:
+            if "이름" in cols:
+                name_col = cols.index("이름")
+            continue  # 헤더 행 자체는 데이터로 안 씀
+        if set("".join(cols)) <= {"-", ""}:
+            continue  # 구분선 행(|---|---|...)
+        if name_col >= len(cols):
+            continue
+        name = cols[name_col]
+        if name and name not in names:
+            names.append(name)
+    return names
 
 
 if __name__ == "__main__":
