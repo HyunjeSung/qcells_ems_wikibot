@@ -52,7 +52,8 @@ def _expand_search_query_llm_call(prompt, timeout=30):
         # 최소한의 역할 지정 + 도구 완전 비활성화로 순수 JSON 완성만 하게 만든다.
         "--system-prompt",
         '너는 검색어 JSON만 출력하는 도구다. 반드시 '
-        '{"core": "...", "keywords": ["...", ...], "person": "..." 또는 null} '
+        '{"core": "...", "keywords": ["...", ...], "person": "..." 또는 null, '
+        '"wants_person_stats": true 또는 false} '
         "형식 하나만 출력하고, 코드펜스나 다른 설명은 절대 붙이지 마라.",
         "--tools", "",
     ]
@@ -95,12 +96,16 @@ def _expand_search_query_llm_call_nocache(prompt, timeout=30):
 
 
 def _parse_expansion(raw_text):
-    """모델 출력에서 {"core": "...", "keywords": [...], "person": "..."/null}을 뽑아
-    (core, keywords_str, person)으로 반환한다. core가 비어있으면 keywords 첫 항목으로
-    대체(모델이 core를 빠뜨려도 완전히 못 쓰게 되지 않도록). person은 질문이 특정
+    """모델 출력에서 {"core": "...", "keywords": [...], "person": "..."/null,
+    "wants_person_stats": true/false}를 뽑아 (core, keywords_str, person,
+    wants_person_stats)로 반환한다. core가 비어있으면 keywords 첫 항목으로 대체
+    (모델이 core를 빠뜨려도 완전히 못 쓰게 되지 않도록). person은 질문이 특정
     인물 한 명을 콕 집어 묻는 게 아니면 빈 문자열/null/누락 다 None으로 정규화한다
     (build_context()가 이 필드만 보고 작성자 검색 앵커를 잡으므로, 모호하면 None 쪽이
-    안전 — 아래 person 필드 설명 참고).
+    안전 — 아래 person 필드 설명 참고). wants_person_stats는 누락/비boolean이면
+    False로 정규화한다(안전한 기본값 — 이 필드가 False로 잘못 나와도 기존 정규식
+    안전망(wiki_chat_server.py의 _PERSON_DOC_COUNT_RE 등)이 여전히 병행 체크되므로
+    완전히 못 잡히지는 않는다, 아래 wants_person_stats 필드 설명 참고).
 
     지시에도 불구하고 ```json 코드펜스나 앞뒤 설명을 붙이는 경우가 있어서,
     첫 '{'~마지막 '}' 구간만 잘라 파싱한다(관대한 파싱 — 실패하면 그냥 폴백)."""
@@ -119,7 +124,8 @@ def _parse_expansion(raw_text):
         return None
     core = str(obj.get("core") or "").strip() or cleaned[0]
     person = str(obj.get("person") or "").strip() or None
-    return core, " ".join(cleaned), person
+    wants_person_stats = obj.get("wants_person_stats") is True
+    return core, " ".join(cleaned), person, wants_person_stats
 
 
 # 프롬프트를 <섹션> 태그로 구조화하고, 규칙을 줄글로 설명하는 대신 실제 실패
@@ -155,41 +161,45 @@ def _parse_expansion(raw_text):
 # 채택 안 함 — 아래 <instructions>에도 이 축을 명시.
 _FEWSHOT_EXAMPLES = """<example>
 <question>DeviceManager 동작원리 알려줘</question>
-<output>{"core": "DeviceManager 동작원리", "keywords": ["DeviceManager", "동작원리", "architecture", "구조", "design"], "person": null}</output>
+<output>{"core": "DeviceManager 동작원리", "keywords": ["DeviceManager", "동작원리", "architecture", "구조", "design"], "person": null, "wants_person_stats": false}</output>
 </example>
 <example>
 <question>BMS가 뭐야</question>
-<output>{"core": "BMS", "keywords": ["BMS", "Battery Management System", "배터리 관리 시스템"], "person": null}</output>
+<output>{"core": "BMS", "keywords": ["BMS", "Battery Management System", "배터리 관리 시스템"], "person": null, "wants_person_stats": false}</output>
 </example>
 <example>
 <question>홍길동이 뭐야</question>
-<output>{"core": "홍길동", "keywords": ["홍길동", "Gildong Hong", "gildong.hong", "gildonghong"], "person": "홍길동"}</output>
+<output>{"core": "홍길동", "keywords": ["홍길동", "Gildong Hong", "gildong.hong", "gildonghong"], "person": "홍길동", "wants_person_stats": false}</output>
 </example>
 <example>
 <question>gem net id 가 ffff 가 아닌 예시 찾아줘</question>
-<output>{"core": "gem net id ffff 아닌 예시", "keywords": ["GEM", "Net ID", "GEM Net ID", "GEM-NET-ID", "gem_net_id", "non-FFFF"], "person": null}</output>
+<output>{"core": "gem net id ffff 아닌 예시", "keywords": ["GEM", "Net ID", "GEM Net ID", "GEM-NET-ID", "gem_net_id", "non-FFFF"], "person": null, "wants_person_stats": false}</output>
 </example>
 <example>
 <context>[사용자] Energy SW 인원 정보 알려줘
 [위키봇] (인원 명단 답변)</context>
 <question>담당업무 로테이션으로 바꾸고 싶은데</question>
-<output>{"core": "Energy SW 담당업무 로테이션", "keywords": ["Energy SW", "담당업무", "로테이션", "Job Rotation", "직무순환", "인사이동"], "person": null}</output>
+<output>{"core": "Energy SW 담당업무 로테이션", "keywords": ["Energy SW", "담당업무", "로테이션", "Job Rotation", "직무순환", "인사이동"], "person": null, "wants_person_stats": false}</output>
 </example>
 <example>
 <question>jack jang/장승혁 프로가 누구야?</question>
-<output>{"core": "jack jang 장승혁", "keywords": ["장승혁", "Jack Jang", "jack.jang", "jackjang", "Seunghyuk Jang", "seunghyuk.jang"], "person": "장승혁"}</output>
+<output>{"core": "jack jang 장승혁", "keywords": ["장승혁", "Jack Jang", "jack.jang", "jackjang", "Seunghyuk Jang", "seunghyuk.jang"], "person": "장승혁", "wants_person_stats": false}</output>
 </example>
 <example>
 <question>장승혁이 문서 몇 개 썼어</question>
-<output>{"core": "장승혁 문서", "keywords": ["장승혁", "Jack Jang", "jack.jang", "jackjang"], "person": "장승혁"}</output>
+<output>{"core": "장승혁 문서", "keywords": ["장승혁", "Jack Jang", "jack.jang", "jackjang"], "person": "장승혁", "wants_person_stats": true}</output>
 </example>
 <example>
 <question>confluence에서, EnergySW 파트 인원을 한정하여, 각각의 인원이 얼마나 많은 page를 생성했는지 정리부탁합니다.</question>
-<output>{"core": "EnergySW 파트 인원 page 생성", "keywords": ["EnergySW", "Energy SW", "인원", "page", "생성", "작성", "페이지 수", "created pages", "author"], "person": null}</output>
+<output>{"core": "EnergySW 파트 인원 page 생성", "keywords": ["EnergySW", "Energy SW", "인원", "page", "생성", "작성", "페이지 수", "created pages", "author"], "person": null, "wants_person_stats": true}</output>
+</example>
+<example>
+<question>energy sw에서 confluence에 페이지를 가장많이 작성한 사람은 누구야?</question>
+<output>{"core": "EnergySW 페이지 가장 많이 작성한 사람", "keywords": ["EnergySW", "Energy SW", "페이지", "작성", "최다", "created pages", "author"], "person": null, "wants_person_stats": true}</output>
 </example>
 <example>
 <question>심철로된 jira티켓 검색, 시간별로 급한것 정렬</question>
-<output>{"core": "심철 jira 티켓 시간별 급한것 정렬", "keywords": ["심철", "Cheol Sim", "sim.cheol", "Jira", "티켓", "우선순위", "priority", "마감일", "due date"], "person": "심철"}</output>
+<output>{"core": "심철 jira 티켓 시간별 급한것 정렬", "keywords": ["심철", "Cheol Sim", "sim.cheol", "Jira", "티켓", "우선순위", "priority", "마감일", "due date"], "person": "심철", "wants_person_stats": false}</output>
 </example>"""
 
 _INSTRUCTIONS = """사내 기술 위키/Confluence 검색에 쓸 검색어를 만드는 도구다.
@@ -237,31 +247,49 @@ _INSTRUCTIONS = """사내 기술 위키/Confluence 검색에 쓸 검색어를 �
   0건으로 실패, "심철"이면 정상 조회됨 — 사용자가 "오타 아닌데"라며 재현,
   2026-09-18). "core" 필드의 조사 제거 규칙과 동일한 기준을 person에도
   똑같이 적용해라.
+- "wants_person_stats": 질문이 "누가 문서를 몇 개/가장 많이/가장 적게 썼는지",
+  "1위/최다/최소가 누구인지", "전체 목록을 다 보여달라" 같이 사람(1명이든 여러
+  명이든)이 작성한 문서의 **개수·순위·전체 목록 자체**를 답으로 요구하면 true.
+  단순히 그 사람/주제에 대한 문서 내용을 묻는 질문(예시 문서 몇 개만 곁들이면
+  충분한 경우)은 false. "몇 개"/"얼마나 많이"라는 표현이 없어도 "가장 많이
+  작성한 사람이 누구야"처럼 순위·최댓값을 묻는 질문이면 true로 판단해라 —
+  이 필드는 정확한 키워드 매칭이 아니라 질문의 의도(개수/순위/전체목록을
+  원하는가)로 판단하는 것이 핵심이다.
 아래 <example>들을 참고해라. 출력은 반드시
-{"core": "...", "keywords": [...], "person": "..." 또는 null}
+{"core": "...", "keywords": [...], "person": "..." 또는 null,
+ "wants_person_stats": true 또는 false}
 JSON 하나만, 다른 설명·코드펜스는 절대 붙이지 마라."""
 
 
 def _expand_search_query(question, history=None, timeout=30):
-    """(core, keywords_str, person) 튜플을 반환한다. core는 문법적 잡음만 걷어낸
-    원본 검색어(build_context()의 1차/신뢰 검색어로 사용), keywords_str은 동의어/
-    표기 변형까지 포함한 보완 검색어(2차/확장 검색에 사용), person은 질문이 특정
-    인물 한 명을 콕 집어 물을 때만 그 이름(아니면 None) — build_context()가
-    작성자(author) 검색 앵커를 잡을 유일한 근거로 쓴다(정규식으로 "한글 2~4음절"을
-    사람 이름 취급하던 예전 방식은 "파트"/"인원" 같은 일반 명사까지 걸려서 폐기,
-    atlassian_mcp_client.py 근처 주석 참고 대신 여기 <instructions>의 person 설명
-    참고). claude -p 실패/타임아웃/미설치 시 (question, question, None)으로 폴백
-    — 검색 자체를 막으면 안 되므로 조용히 원문 그대로 진행하되, 이 경우엔 person을
-    추측할 방법이 없으므로 작성자 앵커링 자체가 꺼진다(일관된 저하 — 다른 확장
-    품질도 이미 같이 저하되는 상황이라 person만 별도 정규식 안전망을 두지 않는다)."""
+    """(core, keywords_str, person, wants_person_stats) 튜플을 반환한다. core는
+    문법적 잡음만 걷어낸 원본 검색어(build_context()의 1차/신뢰 검색어로 사용),
+    keywords_str은 동의어/표기 변형까지 포함한 보완 검색어(2차/확장 검색에 사용),
+    person은 질문이 특정 인물 한 명을 콕 집어 물을 때만 그 이름(아니면 None) —
+    build_context()가 작성자(author) 검색 앵커를 잡을 유일한 근거로 쓴다(정규식으로
+    "한글 2~4음절"을 사람 이름 취급하던 예전 방식은 "파트"/"인원" 같은 일반 명사까지
+    걸려서 폐기, atlassian_mcp_client.py 근처 주석 참고 대신 여기 <instructions>의
+    person 설명 참고). wants_person_stats는 질문이 문서 개수/순위/전체목록 자체를
+    원하는지(예: "누가 가장 많이 썼어", "몇 개 썼어", "다 보여줘") — 이 판단을
+    wiki_chat_server.py의 정규식(_PERSON_DOC_COUNT_RE 등)에만 맡기면 "가장 많이"처럼
+    정규식이 커버 못 하는 새 표현마다 정규식을 또 추가해야 하는 땜빵이 반복되므로
+    (사용자가 이전에 이 패턴을 명시적으로 반려한 적 있음, 이 파일 상단 "장승혁"
+    예시 설명 참고), 이미 호출 중인 이 LLM 판단에 필드를 추가해 일반화했다
+    (2026-09-22, "가장많이 작성한 사람" 질문이 규칙에 안 걸려 놓친 사고로 발견).
+    claude -p 실패/타임아웃/미설치 시 (question, question, None, False)로 폴백 —
+    검색 자체를 막으면 안 되므로 조용히 원문 그대로 진행하되, 이 경우엔 person도
+    wants_person_stats도 추측할 방법이 없으므로 둘 다 꺼진다(일관된 저하 — 다른
+    확장 품질도 이미 같이 저하되는 상황이라 여기서만 정규식 안전망을 두지 않음;
+    다만 wiki_chat_server.py 쪽 정규식은 이 폴백 경로에서도 여전히 독립적으로
+    동작해 최소한의 커버리지를 보장한다)."""
     if not _claude_cli_available():
-        return question, question, None
+        return question, question, None, False
     prompt = _build_expand_prompt(question, history)
     result = _expand_search_query_llm_call(prompt, timeout)
     if not result:
-        return question, question, None
-    core, keywords_str, person = result
-    return core, keywords_str, person
+        return question, question, None, False
+    core, keywords_str, person, wants_person_stats = result
+    return core, keywords_str, person, wants_person_stats
 
 
 def _build_expand_prompt(question, history=None):
@@ -299,7 +327,7 @@ def retry_person_extraction(question, history=None, timeout=30):
     result = _expand_search_query_llm_call_nocache(prompt, timeout)
     if not result:
         return None
-    _, _, person = result
+    _, _, person, _ = result
     return person
 
 

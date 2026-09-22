@@ -1085,8 +1085,10 @@ def build_context(question, history=None):
     # (question, question, None)으로 폴백하므로 아래 로직은 항상 안전하게 동작한다.
     # 세 번째 값 expanded_person은 질문이 특정 인물 한 명을 콕 집어 물을 때만
     # 그 이름이 채워진다 — 아래 anchor 보강 분기(person_name_candidates 정규식이
-    # 있던 자리)에서 쓴다.
-    original_query, expanded_keywords, expanded_person = _expand_search_query(question, history)
+    # 있던 자리)에서 쓴다. 네 번째 값 expanded_wants_stats는 "누가 가장 많이
+    # 썼어"류 개수/순위/전체목록 질문 판별을 정규식 대신 이 LLM 판단에도 같이
+    # 맡긴 것(2026-09-22, 아래 _PERSON_DOC_COUNT_RE 근처 설명 참고).
+    original_query, expanded_keywords, expanded_person, expanded_wants_stats = _expand_search_query(question, history)
     # claude -p는 같은 지시에도 매번 똑같이 순종하지 않는다(샘플링 비결정성, 위
     # _expand_search_query_llm_call 주석 참고) — 실측: "장승혁 프로가 누구야"를 여러 번
     # 물으면 대부분 core="장승혁"으로 깨끗하게 나오지만, 가끔 "장승혁 프로가 누구야"를
@@ -1255,7 +1257,9 @@ def build_context(question, history=None):
             # 으로만 말할 수 있는 경우가 있다 — 200건을 다 채워서 돌아오면 그
             # 사실을 답변에 명시하게 한다.
             wants_full_list = bool(
-                _PERSON_DOC_COUNT_RE.search(question) or _PERSON_DOC_LISTALL_RE.search(question)
+                expanded_wants_stats
+                or _PERSON_DOC_COUNT_RE.search(question)
+                or _PERSON_DOC_LISTALL_RE.search(question)
             )
             creator_limit = 200 if wants_full_list else 10
             author_pages, author_display_name = search_by_creator(anchor_author_id, limit=creator_limit)
@@ -1305,12 +1309,15 @@ def build_context(question, history=None):
                     added += 1
                     if added >= 6:  # 발췌만 쓰지만 소스 목록이 너무 길어지지 않게 상한
                         break
-    elif _PERSON_DOC_COUNT_RE.search(question) or _PERSON_DOC_LISTALL_RE.search(question):
+    elif expanded_wants_stats or _PERSON_DOC_COUNT_RE.search(question) or _PERSON_DOC_LISTALL_RE.search(question):
         # anchor_author_id가 없다는 건(위 elif expanded_person 분기를 안 탔다는 뜻)
         # 질문이 특정 인물 한 명을 지목한 게 아니라는 뜻인데(query_expansion.py의
-        # person 필드가 null), 그런데도 "몇 개/다 보여줘" 같은 개수·목록 의도는
-        # 감지됐다 — "EnergySW 파트 인원을 한정하여 각각의 인원이 얼마나 많은
-        # page를 생성했는지"처럼 특정 인물이 아니라 "우리 팀 전체 각자"를 묻는
+        # person 필드가 null), 그런데도 "몇 개/다 보여줘"·"가장 많이 쓴 사람" 같은
+        # 개수·순위·목록 의도는 감지됐다(정규식 또는 expanded_wants_stats LLM 판단,
+        # 2026-09-22 추가 — "가장많이 작성한 사람은 누구야"가 기존 정규식 어디에도
+        # 안 걸려서 그냥 일반 문서검색으로 새버린 사고로 발견, query_expansion.py의
+        # wants_person_stats 필드 설명 참고). "EnergySW 파트 인원을 한정하여 각각의
+        # 인원이 얼마나 많은 page를 생성했는지"처럼 특정 인물이 아니라 "우리 팀 전체 각자"를 묻는
         # 질문이 정확히 이 조합이다(사용자가 이전 답변에 "이게 맞는 답이라고
         # 생각하니?"로 지적, 2026-09-18 — 그때는 이 elif 자체가 없어서 "한 명씩
         # 물어보세요"로만 답했었음). 이 위키봇이 다루는 유일한 "팀 전체"가
