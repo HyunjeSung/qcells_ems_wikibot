@@ -219,6 +219,43 @@
     cursor: pointer;
   }
   #logoutBtn:hover { border-color: var(--accent); color: var(--text); }
+  #loginBtn { display: none; }
+  #authUsername {
+    display: none;
+    margin-left: 8px;
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+
+  .auth-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,.45);
+    display: flex; align-items: center; justify-content: center; z-index: 50;
+  }
+  .auth-overlay.hidden { display: none; }
+  .auth-modal {
+    background: var(--bg-raised); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px 22px; width: 320px; box-shadow: 0 8px 30px rgba(0,0,0,.2);
+  }
+  .auth-modal h3 { margin: 0 0 14px; font-size: 16px; }
+  .auth-tabs { display: flex; gap: 4px; margin-bottom: 14px; }
+  .auth-tabs button {
+    flex: 1; padding: 6px 0; border: 1px solid var(--border); background: var(--bg);
+    color: var(--text-dim); border-radius: 8px; cursor: pointer; font-size: 13px;
+  }
+  .auth-tabs button.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  .auth-field { margin-bottom: 10px; }
+  .auth-field label { display: block; font-size: 12.5px; color: var(--text-dim); margin-bottom: 4px; }
+  .auth-field input {
+    width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--input-bg); color: var(--text); font-size: 14px;
+  }
+  .auth-status { font-size: 12.5px; margin-top: 6px; min-height: 16px; color: var(--accent); }
+  .auth-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+  .auth-actions button {
+    padding: 7px 14px; border-radius: 8px; border: none; cursor: pointer; font-size: 13px;
+  }
+  .auth-actions .auth-cancel { background: transparent; color: var(--text-dim); }
+  .auth-actions .auth-submit { background: var(--accent); color: var(--accent-text); font-weight: 600; }
 
   /* 대화 시작 전: 화면 중앙에 타이틀 + 입력창 */
   #app.landing #messages { display: none; }
@@ -582,6 +619,8 @@
       <span class="name">Qcells EMS 위키봇</span>
       <span class="version-badge">v1.2.2</span>
       <button id="themeToggleBtn" type="button" title="테마 전환"></button>
+      <button id="loginBtn" type="button">로그인</button>
+      <span id="authUsername"></span>
       <button id="logoutBtn" type="button">로그아웃</button>
     </header>
     <div id="stage">
@@ -598,6 +637,29 @@
         </div>
         <div id="hint">Confluence 라이브 검색 기반으로 답합니다</div>
       </div>
+    </div>
+  </div>
+</div>
+
+<div id="authOverlay" class="auth-overlay hidden">
+  <div class="auth-modal">
+    <div class="auth-tabs">
+      <button type="button" id="authTabLogin" class="active">로그인</button>
+      <button type="button" id="authTabRegister">회원가입</button>
+    </div>
+    <h3 id="authTitle">로그인</h3>
+    <div class="auth-field">
+      <label for="authUsernameInput">아이디</label>
+      <input id="authUsernameInput" type="text" autocomplete="username">
+    </div>
+    <div class="auth-field">
+      <label for="authPasswordInput">비밀번호</label>
+      <input id="authPasswordInput" type="password" autocomplete="current-password">
+    </div>
+    <div id="authStatus" class="auth-status"></div>
+    <div class="auth-actions">
+      <button type="button" class="auth-cancel" id="authCancelBtn">취소</button>
+      <button type="button" class="auth-submit" id="authSubmitBtn">로그인</button>
     </div>
   </div>
 </div>
@@ -630,14 +692,90 @@
   const sidebarCollapseBtn = document.getElementById('sidebarCollapseBtn');
   const sidebarOpenBtn = document.getElementById('sidebarOpenBtn');
   const themeToggleBtn = document.getElementById('themeToggleBtn');
+  const loginBtn = document.getElementById('loginBtn');
   const logoutBtn = document.getElementById('logoutBtn');
+  const authUsernameEl = document.getElementById('authUsername');
+  const authOverlay = document.getElementById('authOverlay');
+  const authTabLogin = document.getElementById('authTabLogin');
+  const authTabRegister = document.getElementById('authTabRegister');
+  const authTitle = document.getElementById('authTitle');
+  const authUsernameInput = document.getElementById('authUsernameInput');
+  const authPasswordInput = document.getElementById('authPasswordInput');
+  const authStatusEl = document.getElementById('authStatus');
+  const authCancelBtn = document.getElementById('authCancelBtn');
+  const authSubmitBtn = document.getElementById('authSubmitBtn');
+
+  let authMode = 'login'; // 'login' | 'register'
+
+  function setAuthMode(mode) {
+    authMode = mode;
+    const isLogin = mode === 'login';
+    authTabLogin.classList.toggle('active', isLogin);
+    authTabRegister.classList.toggle('active', !isLogin);
+    authTitle.textContent = isLogin ? '로그인' : '회원가입';
+    authSubmitBtn.textContent = isLogin ? '로그인' : '가입하기';
+    authStatusEl.textContent = '';
+  }
+
+  function openAuthModal(mode) {
+    setAuthMode(mode);
+    authUsernameInput.value = '';
+    authPasswordInput.value = '';
+    authOverlay.classList.remove('hidden');
+    authUsernameInput.focus();
+  }
+
+  function closeAuthModal() {
+    authOverlay.classList.add('hidden');
+  }
+
+  loginBtn.addEventListener('click', () => openAuthModal('login'));
+  authTabLogin.addEventListener('click', () => setAuthMode('login'));
+  authTabRegister.addEventListener('click', () => setAuthMode('register'));
+  authCancelBtn.addEventListener('click', closeAuthModal);
+  authOverlay.addEventListener('click', (e) => { if (e.target === authOverlay) closeAuthModal(); });
+
+  async function submitAuth() {
+    const username = authUsernameInput.value.trim();
+    const password = authPasswordInput.value;
+    if (!username || !password) {
+      authStatusEl.textContent = '아이디와 비밀번호를 입력해주세요.';
+      return;
+    }
+    authSubmitBtn.disabled = true;
+    try {
+      const res = await fetch(authMode === 'login' ? '/api/login' : '/api/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        authStatusEl.textContent = data.error || '요청에 실패했습니다.';
+        authSubmitBtn.disabled = false;
+        return;
+      }
+      location.reload(); // URL은 그대로(/) — 로그인 쿠키가 생겼으니 새로고침만 해도 서버가 알아서 개인 데이터를 내려준다
+    } catch (e) {
+      authStatusEl.textContent = '네트워크 오류가 발생했습니다.';
+      authSubmitBtn.disabled = false;
+    }
+  }
+  authSubmitBtn.addEventListener('click', submitAuth);
+  authPasswordInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitAuth(); });
 
   logoutBtn.addEventListener('click', async () => {
-    await fetch('/logout', { method: 'POST' });
-    location.reload();
+    await fetch('/api/logout', { method: 'POST' });
+    location.reload(); // 쿠키(session)가 지워졌으니 URL은 그대로 두고 새로고침만 하면 공용 화면으로 돌아간다
   });
   fetch('/api/whoami').then(r => r.json()).then(data => {
-    if (data.admin) logoutBtn.style.display = 'flex';
+    if (data.logged_in) {
+      logoutBtn.style.display = 'flex';
+      authUsernameEl.style.display = 'inline';
+      authUsernameEl.textContent = data.username + '님';
+    } else {
+      loginBtn.style.display = 'flex';
+    }
     // 버전 배지는 원래 이 HTML에 "v1.2.2"로 하드코딩돼 있어서 배포 때마다 직접 고쳐야
     // 했다 — 이제 wikibot.env의 WIKIBOT_VERSION을 /api/whoami로 받아 그대로 표시한다
     // (2026-09-18, 사용자 요청). 값이 없으면 서버가 이미 "dev"를 내려주므로 그대로 둠.

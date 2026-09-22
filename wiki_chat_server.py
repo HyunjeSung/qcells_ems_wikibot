@@ -15,6 +15,7 @@ import sys
 import ssl
 import html
 import json
+import uuid
 import base64
 import shutil
 import smtplib
@@ -24,7 +25,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 
 from flask import Flask, request, jsonify, send_from_directory, session, redirect, url_for, render_template_string
@@ -70,6 +71,14 @@ _CQL_SPACE_CLAUSE = "space in (" + ", ".join(f'"{s}"' for s in CONFLUENCE_SPACES
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("ADMIN_SECRET_KEY") or os.urandom(32)
+# 관리자 로그인 세션을 명시적으로 3시간짜리 영구 쿠키로 만든다(2026-09-22, 사용자 요청 —
+# **관리자 전용**, 일반 사용자 로그인/비로그인은 시간제한 없이 유지하도록 별도로 확정됨).
+# session.permanent를 안 켜면 Flask는 만료 시각이 없는 "브라우저 세션 쿠키"를 내려보내는데,
+# 일부 브라우저/탭 환경에서 이게 페이지 이동만으로도 조용히 사라지는 것처럼 보이는 문제(실측:
+# 관리자 로그인 후 "비로그인" 메뉴 클릭 시 로그아웃된 것처럼 보임)가 있었다. Max-Age가 박힌
+# 쿠키로 바꾸면 "로그아웃 누르거나 3시간 지날 때까지 유지"가 명확해진다. admin_login()에서만
+# session.permanent = True를 켜므로 이 설정도 관리자 세션에만 적용된다.
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=3)
 
 # 화면 우상단/랜딩에 찍히는 버전 배지(2026-09-18 전엔 static/index.html에 "v1.2.2"로 하드코딩
 # 돼 있어서 배포 때마다 HTML을 직접 고쳐야 했다 — 사용자 요청으로 wikibot.env의
@@ -90,15 +99,16 @@ _ADMIN_LOGIN_PAGE = """
 <!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><title>위키봇 관리자 로그인</title>
 <style>
-  body { font-family: -apple-system, sans-serif; background: #0f1115; color: #e6e6e6;
+  body { font-family: -apple-system, sans-serif; background: #FAF9F5; color: #3D3929;
          display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-  form { background: #1a1d24; padding: 2rem 2.5rem; border-radius: 12px; width: 280px; }
+  form { background: #FFFFFF; border: 1px solid #E5E3DA; padding: 2rem 2.5rem; border-radius: 12px;
+         width: 280px; box-shadow: 0 2px 10px rgba(61,57,41,.06); }
   h1 { font-size: 1.1rem; margin: 0 0 1.2rem; }
   input { width: 100%; box-sizing: border-box; padding: 0.6rem 0.7rem; margin-bottom: 0.8rem;
-          border-radius: 6px; border: 1px solid #333; background: #0f1115; color: #e6e6e6; }
-  button { width: 100%; padding: 0.6rem; border: none; border-radius: 6px; background: #4a7dfc;
-           color: white; font-weight: 600; cursor: pointer; }
-  .err { color: #ff6b6b; font-size: 0.85rem; margin-bottom: 0.8rem; }
+          border-radius: 6px; border: 1px solid #E5E3DA; background: #FFFFFF; color: #3D3929; }
+  button { width: 100%; padding: 0.6rem; border: none; border-radius: 6px; background: #C15F3C;
+           color: #FFFFFF; font-weight: 600; cursor: pointer; }
+  .err { color: #B23B3B; font-size: 0.85rem; margin-bottom: 0.8rem; }
 </style></head>
 <body>
   <form method="post">
@@ -134,6 +144,7 @@ if ADMIN_MODE:
         error = None
         if request.method == "POST":
             if _check_admin_credentials(request.form.get("username", ""), request.form.get("password", "")):
+                session.permanent = True
                 session["admin"] = True
                 return redirect(request.args.get("next") or url_for("index"))
             error = "아이디 또는 비밀번호가 올바르지 않습니다."
@@ -143,6 +154,269 @@ if ADMIN_MODE:
     def admin_logout():
         session.clear()
         return redirect(url_for("admin_login"))
+
+    # 관리자 대시보드(2026-09-22 신규) — 예전엔 --admin이 "같은 채팅 UI에 로그인만 추가"였는데,
+    # 이제 관리자의 역할이 "직접 채팅"에서 "가입한 사용자 계정(아이디/비밀번호 평문)과 그들의
+    # 대화 목록을 열람"으로 바뀌어서 index()가 이 화면으로 리다이렉트된다. 서버 렌더링 HTML로
+    # 충분히 단순해서 별도 SPA 없이 Jinja render_template_string만 쓴다.
+    _ADMIN_STYLE = """
+    <style>
+      body { font-family: -apple-system, sans-serif; background: #FAF9F5; color: #3D3929; margin: 0; padding: 2rem 2.5rem; }
+      h1 { font-size: 1.3rem; margin: 0 0 0.3rem; }
+      .sub { color: #83807A; font-size: 0.85rem; margin-bottom: 1.4rem; }
+      a { color: #C15F3C; text-decoration: none; }
+      a:hover { text-decoration: underline; }
+      table { border-collapse: collapse; width: 100%; margin-bottom: 1.5rem; background: #FFFFFF;
+        border: 1px solid #E5E3DA; border-radius: 10px; overflow: hidden; }
+      th, td { text-align: left; padding: 0.55rem 0.8rem; border-bottom: 1px solid #E5E3DA; font-size: 0.9rem; }
+      th { color: #83807A; font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }
+      tr:hover td { background: #F0EEE6; }
+      .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.2rem; }
+      .topbar nav a { margin-right: 1rem; color: #3D3929; font-weight: 600; }
+      .topbar nav a:hover { color: #C15F3C; }
+      .logout-form button { background: #FFFFFF; color: #3D3929; border: 1px solid #E5E3DA; border-radius: 6px;
+        padding: 0.4rem 0.8rem; cursor: pointer; }
+      .logout-form button:hover { border-color: #C15F3C; }
+      .empty { color: #83807A; font-style: italic; padding: 1rem 0; }
+      .pw { font-family: Consolas, monospace; }
+      .msg { border-bottom: 1px solid #E5E3DA; padding: 0.9rem 0; }
+      .msg .role { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; color: #83807A; margin-bottom: 0.3rem; }
+      .msg .content { white-space: pre-wrap; line-height: 1.5; }
+      .msg .sources { margin-top: 0.4rem; font-size: 0.8rem; color: #83807A; }
+      .actions button { background: #FDEDEB; color: #B23B3B; border: 1px solid #F0CFC9; border-radius: 6px;
+        padding: 0.4rem 0.8rem; cursor: pointer; margin-right: 0.5rem; }
+      .actions button.restore { background: #EAF4EA; color: #2E7D32; border-color: #CFE8CF; }
+    </style>
+    """
+
+    _ADMIN_TOPBAR = """
+    <div class="topbar">
+      <nav>
+        <a href="{{ url_for('admin_users') }}">사용자</a>
+        <a href="{{ url_for('admin_anonymous') }}">비로그인</a>
+      </nav>
+      <form class="logout-form" method="post" action="{{ url_for('admin_logout') }}">
+        <button type="submit">로그아웃</button>
+      </form>
+    </div>
+    """
+
+    _ADMIN_USERS_PAGE = """
+    <!doctype html><html lang="ko"><head><meta charset="utf-8"><title>위키봇 관리자 - 사용자</title>""" + _ADMIN_STYLE + """
+    </head><body>""" + _ADMIN_TOPBAR + """
+      <h1>가입 사용자 ({{ users|length }}명)</h1>
+      <div class="sub">아이디/비밀번호는 이 도구가 사내 LAN 전용으로만 노출된다는 전제로 평문 저장됩니다.</div>
+      {% if users %}
+      <table>
+        <tr><th>아이디</th><th>비밀번호</th><th>가입일</th><th>대화 수</th><th>관리</th></tr>
+        {% for u in users %}
+        <tr>
+          <td><a href="{{ url_for('admin_user_conversations', user_id=u.id) }}">{{ u.username }}</a></td>
+          <td class="pw">{{ u.password }}</td>
+          <td>{{ u.created_at }}</td>
+          <td>{{ u.conversation_count }}</td>
+          <td class="actions">
+            <form method="post" action="{{ url_for('admin_user_delete', user_id=u.id) }}"
+                  onsubmit="return confirm('{{ u.username }} 계정과 대화 {{ u.conversation_count }}건을 완전히 삭제합니다. 되돌릴 수 없습니다. 계속할까요?');" style="display:inline">
+              <button type="submit">계정 삭제</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </table>
+      {% else %}
+      <div class="empty">아직 가입한 사용자가 없습니다.</div>
+      {% endif %}
+    </body></html>
+    """
+
+    _ADMIN_CONV_LIST_PAGE = """
+    <!doctype html><html lang="ko"><head><meta charset="utf-8"><title>{{ heading }} - 위키봇 관리자</title>""" + _ADMIN_STYLE + """
+    </head><body>""" + _ADMIN_TOPBAR + """
+      <h1>{{ heading }}</h1>
+      <div class="sub"><a href="{{ back_url }}">← 목록으로</a></div>
+      {% if conversations %}
+      <table>
+        <tr><th>제목</th><th>생성일</th><th>수정일</th><th>상태</th></tr>
+        {% for c in conversations %}
+        <tr>
+          <td><a href="{{ url_for('admin_conversation_detail', conversation_id=c.id) }}">{{ c.title }}</a></td>
+          <td>{{ c.created_at }}</td>
+          <td>{{ c.updated_at }}</td>
+          <td>{{ '삭제됨' if c.deleted_at else '' }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+      {% else %}
+      <div class="empty">대화가 없습니다.</div>
+      {% endif %}
+    </body></html>
+    """
+
+    _ADMIN_ANON_LIST_PAGE = """
+    <!doctype html><html lang="ko"><head><meta charset="utf-8"><title>위키봇 관리자 - 비로그인</title>""" + _ADMIN_STYLE + """
+    </head><body>""" + _ADMIN_TOPBAR + """
+      <h1>비로그인 방문자 ({{ sessions|length }}개 세션)</h1>
+      <div class="sub">로그인하지 않고 공용 페이지에서 대화한 방문자들 — 브라우저 세션 단위로 묶여 있고 계정과는 무관합니다.</div>
+      {% if sessions %}
+      <table>
+        <tr><th>세션</th><th>대화 수</th><th>최근 활동</th></tr>
+        {% for s in sessions %}
+        <tr>
+          <td><a href="{{ url_for('admin_anon_conversations', anon_id=s.anon_session_id) }}">{{ s.anon_session_id[:12] }}…</a></td>
+          <td>{{ s.conversation_count }}</td>
+          <td>{{ s.last_activity }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+      {% else %}
+      <div class="empty">비로그인 대화가 없습니다.</div>
+      {% endif %}
+    </body></html>
+    """
+
+    _ADMIN_CONV_DETAIL_PAGE = """
+    <!doctype html><html lang="ko"><head><meta charset="utf-8"><title>{{ conv.title }} - 위키봇 관리자</title>""" + _ADMIN_STYLE + """
+    </head><body>""" + _ADMIN_TOPBAR + """
+      <h1>{{ conv.title }}</h1>
+      <div class="sub"><a href="{{ back_url }}">← 목록으로</a> · 생성 {{ conv.created_at }} · 수정 {{ conv.updated_at }}
+        {% if conv.deleted_at %} · <strong>삭제됨({{ conv.deleted_at }})</strong>{% endif %}</div>
+      {% for m in conv.messages %}
+      <div class="msg">
+        <div class="role">{{ '질문' if m.role == 'user' else '답변' }}</div>
+        <div class="content">{{ m.content }}</div>
+        {% if m.sources %}
+        <div class="sources">출처: {% for s in m.sources %}<a href="{{ s.url }}" target="_blank">{{ s.label }}</a>{{ ', ' if not loop.last }}{% endfor %}</div>
+        {% endif %}
+      </div>
+      {% endfor %}
+      <div class="actions" style="margin-top:1.2rem;">
+        {% if conv.deleted_at %}
+        <form method="post" action="{{ url_for('conversation_restore', conversation_id=conv.id) }}" style="display:inline">
+          <button type="submit" class="restore">복원</button>
+        </form>
+        {% else %}
+        <form method="post" action="{{ url_for('conversation_delete', conversation_id=conv.id) }}" onsubmit="event.preventDefault(); fetch(this.action, {method:'DELETE'}).then(()=>location.reload());" style="display:inline">
+          <button type="submit">소프트 삭제</button>
+        </form>
+        {% endif %}
+        <form onsubmit="event.preventDefault(); if(confirm('완전히 삭제합니다. 되돌릴 수 없습니다. 계속할까요?')) fetch('{{ url_for('conversation_purge', conversation_id=conv.id) }}', {method:'DELETE'}).then(()=>location.href='{{ back_url }}');" style="display:inline">
+          <button type="submit">완전 삭제</button>
+        </form>
+      </div>
+    </body></html>
+    """
+
+    @app.route("/admin/users")
+    def admin_users():
+        return render_template_string(_ADMIN_USERS_PAGE, users=chat_history.list_users())
+
+    @app.route("/admin/users/<int:user_id>/delete", methods=["POST"])
+    def admin_user_delete(user_id):
+        chat_history.delete_user(user_id)
+        return redirect(url_for("admin_users"))
+
+    @app.route("/admin/users/<int:user_id>/conversations")
+    def admin_user_conversations(user_id):
+        user = chat_history.get_user_by_id(user_id)
+        if user is None:
+            return jsonify({"error": "사용자를 찾을 수 없습니다."}), 404
+        convs = chat_history.list_conversations(limit=500, include_deleted=True, user_id=user_id)
+        return render_template_string(
+            _ADMIN_CONV_LIST_PAGE, heading=f"{user['username']}님의 대화", conversations=convs,
+            back_url=url_for("admin_users"),
+        )
+
+    @app.route("/admin/anonymous")
+    def admin_anonymous():
+        return render_template_string(_ADMIN_ANON_LIST_PAGE, sessions=chat_history.list_anon_sessions())
+
+    @app.route("/admin/anonymous/<anon_id>/conversations")
+    def admin_anon_conversations(anon_id):
+        convs = chat_history.list_conversations(limit=500, include_deleted=True, anon_session_id=anon_id)
+        return render_template_string(
+            _ADMIN_CONV_LIST_PAGE, heading=f"비로그인 세션 {anon_id[:12]}…의 대화", conversations=convs,
+            back_url=url_for("admin_anonymous"),
+        )
+
+    @app.route("/admin/conversations/<conversation_id>")
+    def admin_conversation_detail(conversation_id):
+        conv = chat_history.get_conversation(conversation_id, include_deleted=True)
+        if conv is None:
+            return jsonify({"error": "대화를 찾을 수 없습니다."}), 404
+        if conv.get("user_id"):
+            back_url = url_for("admin_user_conversations", user_id=conv["user_id"])
+        else:
+            back_url = url_for("admin_anon_conversations", anon_id=conv.get("anon_session_id") or "")
+        return render_template_string(_ADMIN_CONV_DETAIL_PAGE, conv=conv, back_url=back_url)
+
+# 일반 사용자 계정 로그인(공용 인스턴스 전용, 2026-09-22 신규) — ADMIN_MODE의 관리자
+# 세션(session["admin"])과는 완전히 별개 키(session["user_id"]/["username"])를 쓴다.
+# 비로그인 방문자도 "이 브라우저 세션 동안의 내 대화" 사이드바를 가지도록 매 요청마다
+# anon_id(세션 쿠키에 저장되는 uuid)를 발급해 conversations.anon_session_id로 묶는다 —
+# 로그인 없이도 개인 대화 목록처럼 보이되, 다른 비로그인 방문자의 대화와는 안 섞인다.
+if not ADMIN_MODE:
+    @app.before_request
+    def _ensure_anon_id():
+        # 로그인 세션과 달리 시간제한을 두지 않는다(사용자 확정, 2026-09-22) — session.permanent를
+        # 켜면 앱 전역 PERMANENT_SESSION_LIFETIME(3시간, 로그인용)을 그대로 물려받아 비로그인
+        # 대화도 3시간 뒤 끊기게 되므로 일부러 안 켬. 예전에 "새로고침하면 대화가 사라진다"고
+        # 느꼈던 원인은 이 플래그가 아니라 서버 재시작마다 서명키(ADMIN_SECRET_KEY)가 랜덤으로
+        # 바뀌어 쿠키가 무효화된 것이었고, 그건 이미 고정 키 사용으로 해결됨 — 여기는 원래대로
+        # "브라우저가 쿠키를 지우기 전까지" 유지되는 무기한 세션 쿠키로 되돌린다.
+        if "user_id" not in session and "anon_id" not in session:
+            session["anon_id"] = uuid.uuid4().hex
+
+    def _current_identity():
+        """(user_id, anon_session_id) 튜플. 로그인 상태면 anon_session_id는 항상 None."""
+        user_id = session.get("user_id")
+        if user_id:
+            return user_id, None
+        return None, session.get("anon_id")
+
+    def _owns_conversation(conv):
+        user_id, anon_id = _current_identity()
+        if user_id:
+            return conv.get("user_id") == user_id
+        return conv.get("anon_session_id") == anon_id
+
+    @app.route("/api/register", methods=["POST"])
+    def register():
+        body = request.get_json(force=True) or {}
+        username = (body.get("username") or "").strip()
+        password = body.get("password") or ""
+        if len(username) < 3:
+            return jsonify({"error": "아이디는 3자 이상이어야 합니다."}), 400
+        if len(password) < 4:
+            return jsonify({"error": "비밀번호는 4자 이상이어야 합니다."}), 400
+        try:
+            user_id = chat_history.create_user(username, password)
+        except chat_history.UsernameTaken:
+            return jsonify({"error": "이미 사용 중인 아이디입니다."}), 409
+        session.clear()
+        # 3시간 제한은 관리자 로그인 전용(admin_login() 참고) — 일반 사용자 로그인은 비로그인
+        # 세션과 마찬가지로 시간제한 없이 유지한다(사용자 확정, 2026-09-22).
+        session["user_id"] = user_id
+        session["username"] = username
+        return jsonify({"ok": True, "username": username})
+
+    @app.route("/api/login", methods=["POST"])
+    def user_login():
+        body = request.get_json(force=True) or {}
+        username = (body.get("username") or "").strip()
+        password = body.get("password") or ""
+        user = chat_history.get_user_by_username(username)
+        if not user or user["password"] != password:
+            return jsonify({"error": "아이디 또는 비밀번호가 올바르지 않습니다."}), 401
+        session.clear()
+        session["user_id"] = user["id"]
+        session["username"] = user["username"]
+        return jsonify({"ok": True, "username": user["username"]})
+
+    @app.route("/api/logout", methods=["POST"])
+    def user_logout():
+        session.clear()
+        return jsonify({"ok": True})
 
 SYSTEM_PROMPT = """당신은 "Qcells EMS 위키봇"입니다. QCells EMS(Energy Management System) 팀의
 Confluence 문서를 배경지식으로 삼아 답하는 개발 어시스턴트입니다.
@@ -1309,6 +1583,12 @@ def generate_answer(history, context, model=None):
 
 @app.route("/")
 def index():
+    if ADMIN_MODE:
+        return redirect(url_for("admin_users"))
+    # URL은 로그인 여부와 무관하게 항상 하나(/)다 — ChatGPT처럼 신원 구분은 URL이 아니라
+    # 세션 쿠키가 한다. 같은 /로 들어와도 로그인된 브라우저는 자기 쿠키 기반으로
+    # /api/conversations 등이 자기 데이터만 걸러 보여주고, 로그인 안 한(또는 다른) 브라우저는
+    # 그 쿠키가 없으니 공용/자기 자신의 화면만 본다(2026-09-22, /app 분리 시도 되돌림).
     return send_from_directory(STATIC_DIR, "index.html")
 
 
@@ -1372,7 +1652,17 @@ def chat():
         return jsonify({"error": "history의 마지막 메시지는 role=user 여야 합니다."}), 400
 
     if not conversation_id:
-        conversation_id = chat_history.create_conversation(history[-1]["content"])
+        if ADMIN_MODE:
+            conversation_id = chat_history.create_conversation(history[-1]["content"])
+        else:
+            user_id, anon_id = _current_identity()
+            conversation_id = chat_history.create_conversation(history[-1]["content"], user_id=user_id, anon_session_id=anon_id)
+    elif not ADMIN_MODE:
+        # 기존 대화에 이어붙이는 경우 — conversation_id를 짐작/재사용해 남의 대화에
+        # 메시지를 끼워넣지 못하도록 소유권을 확인한다.
+        conv = chat_history.get_conversation(conversation_id, include_deleted=True)
+        if conv is None or not _owns_conversation(conv):
+            return jsonify({"error": "대화를 찾을 수 없습니다."}), 404
     if not retry:
         chat_history.add_message(conversation_id, "user", history[-1]["content"])
 
@@ -1402,7 +1692,12 @@ def chat():
 
 @app.route("/api/conversations")
 def conversations():
-    return jsonify({"conversations": chat_history.list_conversations(include_deleted=ADMIN_MODE)})
+    if ADMIN_MODE:
+        convs = chat_history.list_conversations(include_deleted=True)
+    else:
+        user_id, anon_id = _current_identity()
+        convs = chat_history.list_conversations(user_id=user_id, anon_session_id=anon_id)
+    return jsonify({"conversations": convs})
 
 
 @app.route("/api/conversations/<conversation_id>")
@@ -1410,17 +1705,27 @@ def conversation_detail(conversation_id):
     conv = chat_history.get_conversation(conversation_id, include_deleted=ADMIN_MODE)
     if conv is None:
         return jsonify({"error": "대화를 찾을 수 없습니다."}), 404
+    if not ADMIN_MODE and not _owns_conversation(conv):
+        return jsonify({"error": "대화를 찾을 수 없습니다."}), 404
     return jsonify(conv)
 
 
 @app.route("/api/conversations/<conversation_id>", methods=["DELETE"])
 def conversation_delete(conversation_id):
+    if not ADMIN_MODE:
+        conv = chat_history.get_conversation(conversation_id, include_deleted=True)
+        if conv is None or not _owns_conversation(conv):
+            return jsonify({"error": "대화를 찾을 수 없습니다."}), 404
     chat_history.delete_conversation(conversation_id)
     return jsonify({"ok": True})
 
 
 @app.route("/api/conversations/<conversation_id>/restore", methods=["POST"])
 def conversation_restore(conversation_id):
+    if not ADMIN_MODE:
+        conv = chat_history.get_conversation(conversation_id, include_deleted=True)
+        if conv is None or not _owns_conversation(conv):
+            return jsonify({"error": "대화를 찾을 수 없습니다."}), 404
     chat_history.restore_conversation(conversation_id)
     return jsonify({"ok": True})
 
@@ -1532,7 +1837,13 @@ def health():
 
 @app.route("/api/whoami")
 def whoami():
-    return jsonify({"admin": bool(ADMIN_MODE), "version": WIKIBOT_VERSION})
+    logged_in = bool(session.get("user_id")) if not ADMIN_MODE else False
+    return jsonify({
+        "admin": bool(ADMIN_MODE),
+        "version": WIKIBOT_VERSION,
+        "logged_in": logged_in,
+        "username": session.get("username") if logged_in else None,
+    })
 
 
 def main():
