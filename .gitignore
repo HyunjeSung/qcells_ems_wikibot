@@ -7,3 +7,4 @@ wikibot.env
 .usage_exhausted.json
 .confluence_live_images/
 *:Zone.Identifier
+uploads/

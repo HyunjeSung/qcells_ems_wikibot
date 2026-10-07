@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>위키봇 관리자</title>
+<script>
+  (function () {
+    try {
+      var saved = localStorage.getItem('theme');
+      if (saved === 'light' || saved === 'dark') document.documentElement.setAttribute('data-theme', saved);
+    } catch (e) {}
+  })();
+</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="/static/markdown.js"></script>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-records" viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.5a3.5 3.5 0 0 1 0 7M18 14a6.5 6.5 0 0 1 3.5 6"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></symbol>
+  <symbol id="i-undo" viewBox="0 0 24 24"><path d="M9 14L4 9l5-5M4 9h10a6 6 0 0 1 0 12h-3"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></symbol>
+</svg>
+
+<div class="product-shell" id="shell">
+  <div class="nav-backdrop" id="navBackdrop"></div>
+  <aside class="product-sidebar">
+    <div class="brand-row">
+      <a class="brand" href="#/records"><span>Q</span><strong>cells EMS Wiki</strong><small>admin</small></a>
+      <button class="icon-btn mobile-only" id="navCloseBtn" type="button" aria-label="메뉴 닫기"><svg class="i"><use href="#i-x"/></svg></button>
+    </div>
+    <nav class="product-nav" style="margin-top:6px">
+      <a href="#/records" data-view="records"><svg class="i"><use href="#i-records"/></svg>전체 기록<span class="count" id="navConvCount"></span></a>
+      <a href="#/users" data-view="users"><svg class="i"><use href="#i-users"/></svg>사용자<span class="count" id="navUserCount"></span></a>
+    </nav>
+    <div style="flex:1"></div>
+    <div class="sidebar-foot">
+      <span class="who">관리자</span>
+      <form method="post" action="/logout" style="margin:0"><button class="link-btn" type="submit">로그아웃</button></form>
+    </div>
+  </aside>
+
+  <main class="product-main">
+    <header class="product-topbar">
+      <button class="icon-btn mobile-only" id="navOpenBtn" type="button" aria-label="메뉴 열기"><svg class="i"><use href="#i-menu"/></svg></button>
+      <div class="topbar-project"><strong id="topTitle">전체 기록</strong></div>
+      <div class="topbar-actions">
+        <button class="icon-btn" id="themeToggleBtn" type="button" aria-label="테마 전환"></button>
+      </div>
+    </header>
+    <div class="product-content">
+      <div class="page" id="page" style="padding-top:0"></div>
+    </div>
+  </main>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const pageEl = $('page');
+  const shell = $('shell');
+  function icon(name) { return `<svg class="i"><use href="#i-${name}"/></svg>`; }
+  function fmtMs(ms) {
+    if (ms == null) return '';
+    if (ms < 1000) return ms + 'ms';
+    if (ms < 60000) return (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + 's';
+    return Math.floor(ms / 60000) + 'm ' + Math.round((ms % 60000) / 1000) + 's';
+  }
+  function fmtDate(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  }
+  function fmtAgo(iso) {
+    if (!iso) return '';
+    const diff = (Date.now() - new Date(iso).getTime()) / 1000;
+    if (diff < 60) return '방금';
+    if (diff < 3600) return Math.floor(diff / 60) + '분 전';
+    if (diff < 86400) return Math.floor(diff / 3600) + '시간 전';
+    if (diff < 86400 * 30) return Math.floor(diff / 86400) + '일 전';
+    return fmtDate(iso).slice(0, 10);
+  }
+  function modelLabel(id) {
+    const map = { 'claude:sonnet': 'Claude Sonnet', 'claude:opus': 'Claude Opus', 'claude:haiku': 'Claude Haiku' };
+    return map[id] || (id || '').replace(/^(claude|ollama):/, '');
+  }
+
+  // 테마
+  function theme() {
+    const m = document.documentElement.getAttribute('data-theme');
+    if (m === 'light' || m === 'dark') return m;
+    return matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+  function themeIcon() { $('themeToggleBtn').innerHTML = icon(theme() === 'dark' ? 'moon' : 'sun'); }
+  themeIcon();
+  $('themeToggleBtn').addEventListener('click', () => {
+    const next = theme() === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    try { localStorage.setItem('theme', next); } catch (e) {}
+    themeIcon();
+  });
+  if (window.mermaid) mermaid.initialize({ startOnLoad: false, theme: theme() === 'dark' ? 'dark' : 'default' });
+  $('navOpenBtn').addEventListener('click', () => shell.classList.add('shell-nav-open'));
+  $('navCloseBtn').addEventListener('click', () => shell.classList.remove('shell-nav-open'));
+  $('navBackdrop').addEventListener('click', () => shell.classList.remove('shell-nav-open'));
+
+  // ───────────────────────── 데이터 ─────────────────────────
+  let overview = null; // {conversations, users}
+  async function loadOverview(force) {
+    if (overview && !force) return overview;
+    const res = await fetch('/admin/api/overview');
+    if (res.redirected || !res.ok) { location.href = '/login?next=/admin'; return null; }
+    overview = await res.json();
+    $('navConvCount').textContent = overview.conversations.length || '';
+    $('navUserCount').textContent = overview.users.length || '';
+    return overview;
+  }
+
+  // ───────────────────────── 라우팅 ─────────────────────────
+  function route() {
+    const h = location.hash || '#/records';
+    shell.classList.remove('shell-nav-open');
+    const view = h.startsWith('#/users') ? 'users' : 'records';
+    document.querySelectorAll('.product-nav a').forEach(a => a.classList.toggle('active', a.dataset.view === view));
+    const m = h.match(/^#\/history\/([0-9a-f]+)/);
+    if (m) return renderHistory(m[1]);
+    if (view === 'users') return renderUsers();
+    const q = new URLSearchParams(h.split('?')[1] || '');
+    if (q.get('owner')) filterState.filter = q.get('owner');
+    if (q.get('user')) filterState.query = q.get('user');
+    return renderRecords();
+  }
+  window.addEventListener('hashchange', route);
+
+  // ───────────────────────── 전체 기록(/projects 벤치마킹) ─────────────────────────
+  const FILTERS = [
+    ['all', '전체', () => true],
+    ['user', '로그인', c => c.owner_kind === 'user'],
+    ['anon', '비로그인', c => c.owner_kind === 'anon'],
+    ['compare', '모델 비교', c => c.compare_count > 0],
+    ['error', '오류', c => c.error_count > 0],
+    ['deleted', '삭제됨', c => !!c.deleted_at],
+  ];
+  const filterState = { query: '', filter: 'all' };
+
+  async function renderRecords(force) {
+    $('topTitle').textContent = '전체 기록';
+    if (!$('recordsPage')) {
+      pageEl.innerHTML = `<main class="projects-page" id="recordsPage">
+        <header class="projects-page-heading"><div>
+          <div class="page-overline">관리자</div>
+          <h1>전체 기록</h1>
+          <p>모든 사용자의 대화입니다. 행을 누르면 대화 전문과 답변마다 거친 검색·모델 비교·채택 과정을 재생합니다.</p>
+        </div><button type="button" onclick="location.href='/admin#/users'">${icon('users')} 사용자 관리</button></header>
+        <div class="projects-summary" id="summary"></div>
+        <div class="projects-toolbar">
+          <label>${icon('search')}<span class="sr-only">검색</span><input type="search" id="q" placeholder="대화 제목·사용자 이름 검색"></label>
+          <div role="group" aria-label="필터" id="filters"></div>
+          <button type="button" class="projects-refresh" id="refresh" aria-label="새로고침">${icon('refresh')}</button>
+        </div>
+        <section class="dir-table" aria-label="대화 목록">
+          <div class="dir-head"><span>대화</span><span>상태 · 최근 변경</span><span></span></div>
+          <div id="rows"><div class="projects-page-empty">불러오는 중…</div></div>
+        </section></main>`;
+      $('q').value = filterState.query;
+      $('q').addEventListener('input', () => { filterState.query = $('q').value; drawRows(); });
+      $('refresh').addEventListener('click', async () => {
+        $('refresh').classList.add('is-spinning');
+        await loadOverview(true);
+        $('refresh').classList.remove('is-spinning');
+        drawRows();
+      });
+    }
+    await loadOverview(force);
+    if (overview) drawRows();
+  }
+
+  function drawRows() {
+    const convs = overview.conversations;
+    const users = new Set(convs.filter(c => c.owner_kind === 'user').map(c => c.user_id));
+    const runs = convs.reduce((a, c) => a + c.run_count, 0);
+    const cmp = convs.reduce((a, c) => a + c.compare_count, 0);
+    const errs = convs.reduce((a, c) => a + c.error_count, 0);
+    const today = convs.filter(c => Date.now() - new Date(c.updated_at).getTime() < 86400000).length;
+    $('summary').innerHTML = `<span>대화 <b>${convs.length}</b></span><span>로그인 사용자 <b>${users.size}</b></span>
+      <span>답변 실행 <b>${runs}</b></span><span>모델 비교 <b>${cmp}</b></span><span>오류 <b>${errs}</b></span><span>최근 24시간 <b>${today}</b></span>`;
+
+    $('filters').innerHTML = FILTERS.map(([k, l, fn]) =>
+      `<button type="button" data-k="${k}" class="${filterState.filter === k ? 'is-active' : ''}" aria-pressed="${filterState.filter === k}">${l}<small>${convs.filter(fn).length}</small></button>`).join('');
+    $('filters').querySelectorAll('button').forEach(b => b.addEventListener('click', () => { filterState.filter = b.dataset.k; drawRows(); }));
+
+    const fn = FILTERS.find(f => f[0] === filterState.filter)[2];
+    const q = filterState.query.trim().toLowerCase();
+    const list = convs.filter(fn).filter(c => !q || (c.title + ' ' + c.owner).toLowerCase().includes(q));
+    const rowsEl = $('rows');
+    if (!list.length) {
+      rowsEl.innerHTML = `<div class="projects-page-empty"><strong>${convs.length ? '조건에 맞는 대화가 없습니다' : '아직 대화가 없습니다'}</strong><p>${convs.length ? '검색어나 필터를 바꿔보세요.' : ''}</p></div>`;
+      return;
+    }
+    rowsEl.innerHTML = '';
+    list.forEach(c => {
+      const row = document.createElement('div');
+      row.className = 'dir-row' + (c.deleted_at ? ' is-deleted' : '');
+      const status = c.deleted_at ? ['error', '삭제됨'] : c.error_count ? ['error', `오류 ${c.error_count}`] : c.run_count ? ['done', '답변 완료'] : ['idle', '실행 기록 없음'];
+      const bits = [c.owner, `메시지 ${c.message_count}`];
+      if (c.run_count) bits.push(`실행 ${c.run_count}` + (c.compare_count ? ` · 비교 ${c.compare_count}` : '') + (c.deleted_run_count ? ` · 삭제 ${c.deleted_run_count}` : ''));
+      if (c.last_model) bits.push(modelLabel(c.last_model));
+      row.innerHTML = `<span class="project-mark ${c.owner_kind === 'anon' ? 'anon' : ''}"></span>
+        <div class="dir-copy"><strong></strong><small></small></div>
+        <div class="dir-state"><span class="product-status status-${status[0]}"><i></i>${status[1]}</span><small>${fmtAgo(c.updated_at)}${c.total_ms ? ' · 누적 ' + fmtMs(c.total_ms) : ''}</small></div>
+        <div class="dir-side"><a class="project-row-history" href="#/history/${c.id}">과정 보기</a></div>`;
+      row.querySelector('.project-mark').textContent = (c.owner_kind === 'anon' ? '?' : (c.owner || '?').slice(0, 1).toUpperCase());
+      row.querySelector('strong').textContent = c.title;
+      row.querySelector('small').textContent = bits.join(' · ');
+      const side = row.querySelector('.dir-side');
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'project-row-delete';
+      del.title = c.deleted_at ? '복원' : '삭제(소프트)';
+      del.innerHTML = icon(c.deleted_at ? 'undo' : 'trash');
+      del.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (c.deleted_at) await fetch(`/api/conversations/${c.id}/restore`, { method: 'POST' });
+        else await fetch(`/api/conversations/${c.id}`, { method: 'DELETE' });
+        await loadOverview(true);
+        drawRows();
+      });
+      side.appendChild(del);
+      row.addEventListener('click', (e) => { if (!e.target.closest('a,button')) location.hash = '#/history/' + c.id; });
+      rowsEl.appendChild(row);
+    });
+  }
+
+  // ───────────────────────── 기록 상세(/history 벤치마킹) ─────────────────────────
+  function foldEvents(events) {
+    const steps = [], idx = {};
+    (events || []).forEach(ev => {
+      if (ev.type !== 'step') return;
+      if (idx[ev.key] == null) { idx[ev.key] = steps.length; steps.push(Object.assign({}, ev)); }
+      else Object.assign(steps[idx[ev.key]], ev);
+    });
+    return steps;
+  }
+  function railHtml(steps) {
+    return `<ol class="progress-rail">${steps.map(s => {
+      const mark = s.status === 'done' ? icon('check') : s.status === 'error' ? icon('x') : '';
+      const items = (s.items || []).filter(Boolean).slice(0, 6).map(t => `<li>${escapeHtml(t)}</li>`).join('');
+      return `<li class="${s.status === 'running' ? 'error' : s.status}"><span class="mark">${mark}</span><div class="step-main">
+        <div class="step-label">${escapeHtml(s.label)}</div>${s.detail ? `<div class="step-detail">${escapeHtml(s.detail)}</div>` : ''}
+        ${items ? `<ul class="step-items">${items}</ul>` : ''}</div><span class="step-ms">${s.ms != null ? fmtMs(s.ms) : ''}</span></li>`;
+    }).join('')}</ol>`;
+  }
+  function modelTableHtml(run) {
+    const cands = run.candidates || [];
+    if (!cands.length) return '';
+    const compare = run.mode === 'compare';
+    let html = `<table class="hero-record-table"><thead><tr><th>모델</th>${compare ? '<th class="num">점수</th>' : ''}<th class="num">시간</th><th>판정</th></tr></thead><tbody>`;
+    cands.forEach((c, i) => {
+      const adopted = c.decision === '채택';
+      const j = c.judge;
+      const sub = c.status === 'error' ? (c.error || '생성 실패')
+        : j ? `심사 ${j.score} · 규칙 ${c.heuristic}` : c.chars ? c.chars.toLocaleString() + '자' : '';
+      html += `<tr class="${adopted ? 'is-adopted' : ''} ${compare && c.answer ? 'clickable' : ''}" data-i="${i}">
+        <td><strong>${escapeHtml(c.label || modelLabel(c.model))}</strong><small>${escapeHtml(sub)}</small></td>
+        ${compare ? `<td class="num">${c.score != null ? `<strong>${c.score}</strong><div class="score-bar"><i style="width:${Math.max(2, Math.min(100, c.score))}%"></i></div>` : '—'}</td>` : ''}
+        <td class="num"><small>${fmtMs(c.ms)}</small></td>
+        <td>${c.decision ? `<span class="stamp ${adopted ? 'adopt' : 'reject'}">${c.decision}</span>` : '<span class="stamp reject">실패</span>'}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    const v = run.verdict;
+    if (compare && v) {
+      html += `<p class="hero-record-gate">채택 기준: <b>블라인드 심사(${escapeHtml(v.judged_by === 'heuristic' ? '실패 → 규칙만' : v.judged_by)}) 70% + 규칙 30%</b> · 기본 모델(${escapeHtml(modelLabel(v.incumbent))})을 바꾸려면 최소 ${v.required_margin}점 차이 필요${v.margin != null ? ` → 1·2위 차이 <b>${v.margin}점</b>` : ''} · ${escapeHtml(v.rule)}</p>`;
+    }
+    return html;
+  }
+
+  async function renderHistory(id) {
+    pageEl.innerHTML = '<div class="projects-page-empty">불러오는 중…</div>';
+    const res = await fetch('/admin/api/conversations/' + id);
+    if (!res.ok) { pageEl.innerHTML = '<div class="projects-page-empty"><strong>대화를 찾을 수 없습니다</strong><p><a class="back-link" href="#/records">← 전체 기록</a></p></div>'; return; }
+    const conv = await res.json();
+    $('topTitle').textContent = conv.title;
+    const runs = conv.runs || [];
+    const runById = {};
+    runs.forEach((r, i) => { runById[r.id] = Object.assign(r, { n: i + 1 }); });
+    const totalMs = runs.reduce((a, r) => a + (r.duration_ms || 0), 0);
+    const cmp = runs.filter(r => r.mode === 'compare').length;
+
+    pageEl.innerHTML = `<main class="history-page">
+      <a class="back-link" href="#/records">${icon('back')} 전체 기록</a>
+      <header class="history-head">
+        <div class="page-overline">기록 · ${escapeHtml(conv.owner)}</div>
+        <h1></h1>
+        <div class="history-meta">
+          <span>시작 <b>${fmtDate(conv.created_at)}</b></span><span>최근 <b>${fmtDate(conv.updated_at)}</b></span>
+          <span>메시지 <b>${conv.messages.length}</b></span><span>답변 실행 <b>${runs.length}</b>${cmp ? ` (모델 비교 ${cmp})` : ''}</span>
+          ${totalMs ? `<span>누적 처리 <b>${fmtMs(totalMs)}</b></span>` : ''}
+          ${conv.deleted_at ? `<span class="status-error">삭제됨 ${fmtDate(conv.deleted_at)}</span>` : ''}
+        </div>
+        <div class="history-actions" id="actions"></div>
+      </header>
+      <div class="history-grid">
+        <section><h2>대화 · 사용자와 위키봇</h2><div class="history-thread" id="thread"></div></section>
+        <aside class="history-activity"><h2>활동 기록 · 답변마다 거친 과정</h2><div id="activity"></div></aside>
+      </div></main>`;
+    pageEl.querySelector('h1').textContent = conv.title;
+    pageEl.scrollTop = 0;
+
+    const actions = $('actions');
+    const mkBtn = (label, cls, fn) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'btn ' + cls; b.textContent = label; b.addEventListener('click', fn); actions.appendChild(b); };
+    if (conv.deleted_at) mkBtn('복원', '', async () => { await fetch(`/api/conversations/${id}/restore`, { method: 'POST' }); overview = null; renderHistory(id); });
+    else mkBtn('삭제(소프트)', '', async () => { await fetch(`/api/conversations/${id}`, { method: 'DELETE' }); overview = null; renderHistory(id); });
+    mkBtn('완전 삭제', '', async () => {
+      if (!confirm('완전히 삭제합니다. 되돌릴 수 없습니다. 계속할까요?')) return;
+      await fetch(`/api/conversations/${id}/purge`, { method: 'DELETE' });
+      overview = null;
+      location.hash = '#/records';
+    });
+
+    const thread = $('thread');
+    const msgEls = {};
+    conv.messages.forEach(m => {
+      const wrap = document.createElement('div');
+      wrap.className = 'msg ' + m.role + (m.deleted_at ? ' is-deleted' : '');
+      const role = document.createElement('div');
+      role.className = 'message-role';
+      const run = m.run_id && runById[m.run_id];
+      if (m.role === 'assistant') {
+        role.innerHTML = `<span>위키봇</span><span class="model-tag"></span>`;
+        if (run) role.querySelector('.model-tag').textContent = `· #${run.n} ${modelLabel(run.adopted_model)}${run.mode === 'compare' ? ` (${(run.candidates || []).length}개 중 채택)` : ''}`;
+      } else role.textContent = conv.owner;
+      if (m.deleted_at) role.insertAdjacentHTML('beforeend', ` <span class="status-error">· 사용자가 삭제함 ${fmtDate(m.deleted_at)}</span>`);
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      renderMessage(bubble, m.content);
+      if (m.sources && m.sources.length) {
+        const src = document.createElement('div');
+        src.className = 'msg-actions';
+        src.innerHTML = m.sources.map(s => s.url
+          ? `<a class="chip-btn" href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(s.label)}</a>`
+          : `<span class="chip-btn">${escapeHtml(s.label)}</span>`).join('');
+        bubble.appendChild(src);
+      }
+      if (m.role === 'assistant') {
+        wrap.insertAdjacentHTML('beforeend', robotHtml('ready'));
+        const content = document.createElement('div');
+        content.className = 'message-content';
+        content.appendChild(role);
+        content.appendChild(bubble);
+        wrap.appendChild(content);
+      } else {
+        wrap.appendChild(role);
+        wrap.appendChild(bubble);
+      }
+      thread.appendChild(wrap);
+      if (run) msgEls[run.id] = wrap;
+    });
+
+    const activity = $('activity');
+    if (!runs.length) {
+      activity.innerHTML = '<p class="wb-empty">이 대화에는 실행 기록이 없습니다(작업대 기능 도입 전 대화).</p>';
+      return;
+    }
+    runs.forEach(run => {
+      const card = document.createElement('div');
+      card.className = 'run-card' + (run.status === 'error' ? ' is-error' : '') + (run.deleted_at ? ' is-deleted' : '');
+      card.innerHTML = `<span class="run-dot">${run.n}</span><div>
+        <div class="run-q"></div>
+        <div class="run-sub">${fmtDate(run.created_at)} · ${fmtMs(run.duration_ms)} · ${run.mode === 'compare' ? '모델 비교' : '단일 모델'} · 출처 ${run.sources_count || 0}건${run.status === 'error' ? ' · <span class="status-error">오류</span>' : ''}${run.deleted_at ? ` · <span class="status-error">사용자가 삭제함</span>` : ''}</div>
+        ${modelTableHtml(run)}
+        <details><summary>작업 단계 ${foldEvents(run.events).length}개</summary>${railHtml(foldEvents(run.events))}</details></div>`;
+      card.querySelector('.run-q').textContent = run.question;
+      card.querySelector('.run-q').addEventListener('click', () => {
+        activity.querySelectorAll('.run-card').forEach(c => c.classList.remove('is-focused'));
+        card.classList.add('is-focused');
+        thread.querySelectorAll('.msg.is-focused').forEach(el => el.classList.remove('is-focused'));
+        const el = msgEls[run.id];
+        if (el) { el.classList.add('is-focused'); el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+      });
+      card.querySelectorAll('tr.clickable').forEach(tr => tr.addEventListener('click', () => openCandidate(run.candidates[+tr.dataset.i])));
+      activity.appendChild(card);
+    });
+  }
+
+  function openCandidate(c) {
+    const ov = document.createElement('div');
+    ov.className = 'overlay';
+    const j = c.judge || {};
+    ov.innerHTML = `<div class="modal wide"><div class="modal-head"><h3></h3><button class="icon-btn" type="button" aria-label="닫기">${icon('x')}</button></div>
+      <div class="candidate-meta"><span>최종 <b>${c.score != null ? c.score : '—'}</b>점</span>
+      ${c.judge ? `<span>심사 <b>${j.score}</b> (근거 ${j.grounded} · 관련 ${j.relevant} · 완결 ${j.complete})</span>` : ''}
+      <span>규칙 <b>${c.heuristic != null ? c.heuristic : '—'}</b></span><span>생성 ${fmtMs(c.ms)}</span></div>
+      ${j.reason ? `<p class="modal-sub" style="margin:0 0 10px">심사 의견: ${escapeHtml(j.reason)}</p>` : ''}
+      ${(c.heuristic_notes || []).length ? `<ul class="candidate-notes">${c.heuristic_notes.map(n => `<li>${escapeHtml(n)}</li>`).join('')}</ul>` : ''}
+      <div class="bubble" style="border-top:1px solid var(--line);padding-top:12px"></div></div>`;
+    ov.querySelector('h3').textContent = `${c.label || modelLabel(c.model)} — ${c.decision || ''}`;
+    renderMessage(ov.querySelector('.bubble'), c.answer || '(답변 원문 없음)');
+    const close = () => ov.remove();
+    ov.querySelector('button').addEventListener('click', close);
+    ov.addEventListener('click', (e) => { if (e.target === ov) close(); });
+    document.body.appendChild(ov);
+  }
+
+  // ───────────────────────── 사용자 ─────────────────────────
+  async function renderUsers() {
+    $('topTitle').textContent = '사용자';
+    await loadOverview(true);
+    if (!overview) return;
+    const users = overview.users;
+    pageEl.innerHTML = `<main class="projects-page">
+      <header class="projects-page-heading"><div>
+        <div class="page-overline">관리자</div><h1>사용자</h1>
+        <p>아이디/비밀번호는 이 도구가 사내 LAN 전용으로만 노출된다는 전제로 평문 저장됩니다.</p>
+      </div></header>
+      <div class="table-scroll"><table class="projects-table admin-users-table" id="userTable"></table></div></main>`;
+    const table = $('userTable');
+    if (!users.length) { table.innerHTML = '<tbody><tr><td class="empty-state">아직 가입한 사용자가 없습니다.</td></tr></tbody>'; return; }
+    table.innerHTML = `<thead><tr><th>아이디</th><th>비밀번호</th><th>가입일</th><th class="num">대화</th><th></th></tr></thead><tbody></tbody>`;
+    users.forEach(u => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td><div class="q"></div></td><td class="pw"></td><td class="nowrap">${fmtDate(u.created_at)}</td><td class="num">${u.conversation_count}</td>
+        <td><div class="row-actions"><button type="button" data-a="list">대화 보기</button><button type="button" data-a="del" class="danger">계정 삭제</button></div></td>`;
+      tr.querySelector('.q').textContent = u.username;
+      tr.querySelector('.pw').textContent = u.password;
+      tr.querySelector('[data-a=list]').addEventListener('click', (e) => {
+        e.stopPropagation();
+        filterState.filter = 'user';
+        filterState.query = u.username;
+        location.hash = '#/records';
+      });
+      tr.querySelector('[data-a=del]').addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (!confirm(`${u.username} 계정과 대화 ${u.conversation_count}건을 완전히 삭제합니다. 되돌릴 수 없습니다. 계속할까요?`)) return;
+        await fetch(`/admin/api/users/${u.id}/delete`, { method: 'POST' });
+        renderUsers();
+      });
+      tr.addEventListener('click', () => tr.querySelector('[data-a=list]').click());
+      table.querySelector('tbody').appendChild(tr);
+    });
+  }
+
+  route();
+</script>
+</body>
+</html>

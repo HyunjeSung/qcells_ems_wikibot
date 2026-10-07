@@ -83,6 +83,54 @@ def init_db():
             ("legacy-pre-login",),
         )
 
+        # 작업대/실행 기록(2026-10-07 신규) — 답변 하나가 만들어지기까지 거친 파이프라인 단계
+        # (검색어 분석 → Rovo 검색 → 인물/Jira 보강 → 답변 생성 → 모델 비교 판정)를 run 단위로
+        # 남긴다. 답변 메시지는 run_id로 자기 run을 가리켜서, 과거 대화를 다시 열어도 그 답변이
+        # 어떤 과정을 거쳤는지 우측 작업대에서 그대로 재생할 수 있다.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS runs (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
+                question TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                adopted_model TEXT,
+                status TEXT NOT NULL,
+                events TEXT,
+                candidates TEXT,
+                verdict TEXT,
+                sources_count INTEGER,
+                duration_ms INTEGER,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_conv ON runs(conversation_id)")
+        msg_cols = {row["name"] for row in conn.execute("PRAGMA table_info(messages)")}
+        if "run_id" not in msg_cols:
+            conn.execute("ALTER TABLE messages ADD COLUMN run_id TEXT")
+        # 실행 기록 1건 단위 소프트 삭제(2026-10-07) — 사용자 화면의 실행 기록 ✕는 그 질문·답변 한
+        # 쌍만 숨기고, 관리자 화면에서는 "삭제됨"으로 계속 보인다.
+        if "deleted_at" not in msg_cols:
+            conn.execute("ALTER TABLE messages ADD COLUMN deleted_at TEXT")
+        run_cols = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
+        if "deleted_at" not in run_cols:
+            conn.execute("ALTER TABLE runs ADD COLUMN deleted_at TEXT")
+
+        # 사용자가 올린 파일(2026-10-07 신규). 원본은 디스크(uploads/)에, 여기에는 메타데이터와
+        # 추출 텍스트 경로만 둔다. 소유자 구분은 conversations와 같은 user_id/anon_session_id 규칙.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS files (
+                id TEXT PRIMARY KEY,
+                filename TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                kind TEXT,
+                text_chars INTEGER NOT NULL,
+                stored_name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                user_id INTEGER REFERENCES users(id),
+                anon_session_id TEXT
+            )
+        """)
+
         conn.commit()
 
 
@@ -115,11 +163,11 @@ def touch_conversation(conversation_id):
         conn.commit()
 
 
-def add_message(conversation_id, role, content, sources=None):
+def add_message(conversation_id, role, content, sources=None, run_id=None):
     with closing(_connect()) as conn:
         conn.execute(
-            "INSERT INTO messages (conversation_id, role, content, sources, created_at) VALUES (?, ?, ?, ?, ?)",
-            (conversation_id, role, content, json.dumps(sources) if sources else None, _now()),
+            "INSERT INTO messages (conversation_id, role, content, sources, created_at, run_id) VALUES (?, ?, ?, ?, ?, ?)",
+            (conversation_id, role, content, json.dumps(sources) if sources else None, _now(), run_id),
         )
         conn.execute(
             "UPDATE conversations SET updated_at = ? WHERE id = ?",
@@ -128,7 +176,7 @@ def add_message(conversation_id, role, content, sources=None):
         conn.commit()
 
 
-def replace_last_message(conversation_id, role, content, sources=None):
+def replace_last_message(conversation_id, role, content, sources=None, run_id=None):
     """모델 escalation 재시도(같은 turn) 시 새 행을 또 쌓지 않고 마지막 메시지를 덮어쓴다."""
     with closing(_connect()) as conn:
         row = conn.execute(
@@ -137,13 +185,13 @@ def replace_last_message(conversation_id, role, content, sources=None):
         ).fetchone()
         if row is None:
             conn.execute(
-                "INSERT INTO messages (conversation_id, role, content, sources, created_at) VALUES (?, ?, ?, ?, ?)",
-                (conversation_id, role, content, json.dumps(sources) if sources else None, _now()),
+                "INSERT INTO messages (conversation_id, role, content, sources, created_at, run_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (conversation_id, role, content, json.dumps(sources) if sources else None, _now(), run_id),
             )
         else:
             conn.execute(
-                "UPDATE messages SET content = ?, sources = ?, created_at = ? WHERE id = ?",
-                (content, json.dumps(sources) if sources else None, _now(), row["id"]),
+                "UPDATE messages SET content = ?, sources = ?, created_at = ?, run_id = ? WHERE id = ?",
+                (content, json.dumps(sources) if sources else None, _now(), run_id, row["id"]),
             )
         conn.execute(
             "UPDATE conversations SET updated_at = ? WHERE id = ?",
@@ -184,7 +232,8 @@ def get_conversation(conversation_id, include_deleted=False):
         if conv is None:
             return None
         rows = conn.execute(
-            "SELECT role, content, sources FROM messages WHERE conversation_id = ? ORDER BY id ASC",
+            "SELECT role, content, sources, run_id, deleted_at FROM messages WHERE conversation_id = ?"
+            + ("" if include_deleted else " AND deleted_at IS NULL") + " ORDER BY id ASC",
             (conversation_id,),
         ).fetchall()
     messages = [
@@ -192,6 +241,8 @@ def get_conversation(conversation_id, include_deleted=False):
             "role": r["role"],
             "content": r["content"],
             "sources": json.loads(r["sources"]) if r["sources"] else None,
+            "run_id": r["run_id"],
+            "deleted_at": r["deleted_at"],
         }
         for r in rows
     ]
@@ -292,6 +343,183 @@ def list_anon_sessions():
             ORDER BY last_activity DESC
         """).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── 실행 기록(runs) ──
+
+_RUN_JSON_FIELDS = ("events", "candidates", "verdict")
+
+
+def _run_from_row(row):
+    run = dict(row)
+    for key in _RUN_JSON_FIELDS:
+        run[key] = json.loads(run[key]) if run.get(key) else None
+    return run
+
+
+def save_run(run):
+    """run dict(id/conversation_id/question/mode/adopted_model/status/events/candidates/verdict/
+    sources_count/duration_ms)를 저장한다. 같은 id가 있으면 덮어쓴다(escalation 재시도 대비)."""
+    with closing(_connect()) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO runs (id, conversation_id, question, mode, adopted_model, status, events, "
+            "candidates, verdict, sources_count, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                run["id"], run.get("conversation_id"), run["question"], run["mode"], run.get("adopted_model"),
+                run["status"], json.dumps(run.get("events") or [], ensure_ascii=False),
+                json.dumps(run.get("candidates") or [], ensure_ascii=False),
+                json.dumps(run.get("verdict"), ensure_ascii=False) if run.get("verdict") else None,
+                run.get("sources_count") or 0, run.get("duration_ms") or 0, run.get("created_at") or _now(),
+            ),
+        )
+        conn.commit()
+
+
+def get_run(run_id):
+    with closing(_connect()) as conn:
+        row = conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+    return _run_from_row(row) if row else None
+
+
+def list_runs(limit=200, user_id=None, anon_session_id=None, include_deleted=False):
+    """기록 화면용 — 소유자 필터는 list_conversations와 같은 규칙(둘 다 None이면 전체)."""
+    query = (
+        "SELECT r.id, r.conversation_id, r.question, r.mode, r.adopted_model, r.status, r.candidates, "
+        "r.verdict, r.sources_count, r.duration_ms, r.created_at, c.title AS conversation_title "
+        "FROM runs r JOIN conversations c ON c.id = r.conversation_id"
+    )
+    clauses = []
+    params = []
+    if not include_deleted:
+        clauses.append("c.deleted_at IS NULL")
+        clauses.append("r.deleted_at IS NULL")
+    if user_id is not None:
+        clauses.append("c.user_id = ?")
+        params.append(user_id)
+    elif anon_session_id is not None:
+        clauses.append("c.anon_session_id = ?")
+        params.append(anon_session_id)
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY r.created_at DESC LIMIT ?"
+    params.append(limit)
+    with closing(_connect()) as conn:
+        rows = conn.execute(query, params).fetchall()
+    out = []
+    for r in rows:
+        run = dict(r)
+        run["candidates"] = json.loads(run["candidates"]) if run.get("candidates") else []
+        run["verdict"] = json.loads(run["verdict"]) if run.get("verdict") else None
+        out.append(run)
+    return out
+
+
+def list_conversations_overview(limit=1000):
+    """관리자 "전체 기록" 화면용 — 모든 소유자의 대화를 소유자 이름·메시지/실행 수·마지막 실행
+    상태와 함께 한 번에 뽑는다(소프트 삭제된 대화 포함)."""
+    with closing(_connect()) as conn:
+        rows = conn.execute("""
+            SELECT c.id, c.title, c.created_at, c.updated_at, c.deleted_at, c.user_id, c.anon_session_id,
+                   u.username,
+                   (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) AS message_count,
+                   (SELECT COUNT(*) FROM runs r WHERE r.conversation_id = c.id) AS run_count,
+                   (SELECT COUNT(*) FROM runs r WHERE r.conversation_id = c.id AND r.deleted_at IS NOT NULL) AS deleted_run_count,
+                   (SELECT COUNT(*) FROM runs r WHERE r.conversation_id = c.id AND r.mode = 'compare') AS compare_count,
+                   (SELECT COUNT(*) FROM runs r WHERE r.conversation_id = c.id AND r.status = 'error') AS error_count,
+                   (SELECT r.adopted_model FROM runs r WHERE r.conversation_id = c.id
+                     ORDER BY r.created_at DESC LIMIT 1) AS last_model,
+                   (SELECT SUM(r.duration_ms) FROM runs r WHERE r.conversation_id = c.id) AS total_ms
+            FROM conversations c
+            LEFT JOIN users u ON u.id = c.user_id
+            ORDER BY c.updated_at DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_run(run_id):
+    """실행 기록 1건 소프트 삭제 — 그 run과, 그 run의 질문·답변 메시지 한 쌍을 숨긴다.
+    대화에 남은 메시지가 하나도 없으면 대화 자체도 소프트 삭제한다. 반환: 대화도 지워졌는지."""
+    now = _now()
+    with closing(_connect()) as conn:
+        run = conn.execute("SELECT conversation_id, question FROM runs WHERE id = ?", (run_id,)).fetchone()
+        if run is None:
+            return False
+        conv_id = run["conversation_id"]
+        conn.execute("UPDATE runs SET deleted_at = ? WHERE id = ?", (now, run_id))
+        linked = conn.execute(
+            "SELECT id, role FROM messages WHERE run_id = ? AND deleted_at IS NULL", (run_id,)
+        ).fetchall()
+        for m in linked:
+            conn.execute("UPDATE messages SET deleted_at = ? WHERE id = ?", (now, m["id"]))
+        if not any(m["role"] == "user" for m in linked):
+            # 질문 메시지에 run_id를 남기기 전(2026-10-07 이전)에 쌓인 기록 — 답변 바로 앞쪽의 같은
+            # 내용 질문 중 아직 안 지워졌고 다른 run에 묶이지 않은 것을 짝으로 본다.
+            answer_id = max((m["id"] for m in linked if m["role"] == "assistant"), default=None)
+            q = conn.execute(
+                "SELECT id FROM messages WHERE conversation_id = ? AND role = 'user' AND content = ? "
+                "AND deleted_at IS NULL AND run_id IS NULL" + (" AND id < ?" if answer_id else "")
+                + " ORDER BY id DESC LIMIT 1",
+                (conv_id, run["question"], answer_id) if answer_id else (conv_id, run["question"]),
+            ).fetchone()
+            if q:
+                conn.execute("UPDATE messages SET deleted_at = ? WHERE id = ?", (now, q["id"]))
+        left = conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND deleted_at IS NULL", (conv_id,)
+        ).fetchone()[0]
+        conv_deleted = left == 0
+        if conv_deleted:
+            conn.execute("UPDATE conversations SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL", (now, conv_id))
+        conn.commit()
+    return conv_deleted
+
+
+def list_runs_for_conversation(conversation_id):
+    with closing(_connect()) as conn:
+        rows = conn.execute(
+            "SELECT * FROM runs WHERE conversation_id = ? ORDER BY created_at ASC", (conversation_id,)
+        ).fetchall()
+    return [_run_from_row(r) for r in rows]
+
+
+# ── 업로드 파일(files) ──
+
+def create_file(file_id, filename, size, kind, text_chars, stored_name, user_id=None, anon_session_id=None):
+    with closing(_connect()) as conn:
+        conn.execute(
+            "INSERT INTO files (id, filename, size, kind, text_chars, stored_name, created_at, user_id, anon_session_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (file_id, filename, size, kind, text_chars, stored_name, _now(), user_id, anon_session_id),
+        )
+        conn.commit()
+
+
+def get_file(file_id):
+    with closing(_connect()) as conn:
+        row = conn.execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def list_files(user_id=None, anon_session_id=None, limit=200):
+    query = "SELECT * FROM files"
+    params = []
+    if user_id is not None:
+        query += " WHERE user_id = ?"
+        params.append(user_id)
+    elif anon_session_id is not None:
+        query += " WHERE anon_session_id = ?"
+        params.append(anon_session_id)
+    query += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    with closing(_connect()) as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_file(file_id):
+    with closing(_connect()) as conn:
+        conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
+        conn.commit()
 
 
 init_db()

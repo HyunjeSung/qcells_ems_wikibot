@@ -16,6 +16,9 @@ import ssl
 import html
 import json
 import uuid
+import time
+import queue
+import threading
 import base64
 import shutil
 import smtplib
@@ -28,7 +31,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 
-from flask import Flask, request, jsonify, send_from_directory, session, redirect, url_for, render_template_string
+from flask import Flask, Response, request, jsonify, send_from_directory, session, redirect, url_for, render_template_string
 
 sys.path.insert(0, str(Path(__file__).parent))
 from search_query_utils import _clean_query, _tech_query, _extract_terms, _KO_STOP, _apply_person_aliases  # CQL 검색어 정제용 헬퍼만 재사용 (로컬 위키 검색 자체는 미사용)
@@ -40,11 +43,14 @@ from confluence_to_text import render as render_storage_html
 from bs4 import BeautifulSoup
 from atlassian_mcp_client import (
     rovo_search, search_by_creator, find_author_id_by_title, lookup_cached_person_in_text,
-    get_energysw_roster, _ROSTER_PAGE_TITLE,
+    get_energysw_roster, _ROSTER_PAGE_TITLE, SITE_URL as ATLASSIAN_SITE,
     _EMPTY_BODY_NOTE, _confluence_space_of, CONFLUENCE_PERSONAL_SPACE_OWNERS,
 )
 from jira_client import search_jira_assigned  # Jira 연동 전담 모듈(atlassian_mcp_client.py 상단 주석 참고)
 import wiki_chat_history as chat_history
+from run_trace import Tracer  # 작업대(파이프라인 단계 실시간 표시/실행 기록) 이벤트 수집
+import model_arena  # 여러 모델 답변 비교 → 채택
+import file_store  # 업로드 파일 저장/텍스트 추출
 
 BASE_DIR = Path(__file__).parent
 STATIC_DIR = BASE_DIR / "static"
@@ -79,6 +85,7 @@ app.secret_key = os.environ.get("ADMIN_SECRET_KEY") or os.urandom(32)
 # 쿠키로 바꾸면 "로그아웃 누르거나 3시간 지날 때까지 유지"가 명확해진다. admin_login()에서만
 # session.permanent = True를 켜므로 이 설정도 관리자 세션에만 적용된다.
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=3)
+app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 파일 업로드(file_store.MAX_UPLOAD_BYTES=20MB + 여유)
 
 # 화면 우상단/랜딩에 찍히는 버전 배지(2026-09-18 전엔 static/index.html에 "v1.2.2"로 하드코딩
 # 돼 있어서 배포 때마다 HTML을 직접 고쳐야 했다 — 사용자 요청으로 wikibot.env의
@@ -95,28 +102,38 @@ ADMIN_PASSWORD_HASH = os.environ.get("ADMIN_PASSWORD_HASH", "")
 
 _ADMIN_LOGIN_EXEMPT_PATHS = {"/login", "/health"}
 
+# 관리자 인스턴스(18011)는 공용 인스턴스(8010)와 다른 이름의 세션 쿠키를 쓴다(2026-10-07 버그 수정).
+# 브라우저 쿠키는 포트를 구분하지 않아서, 둘 다 기본 이름("session")을 쓰면 같은 PC에서 관리자 페이지에
+# 로그인하는 순간 공용 화면의 쿠키(비로그인 anon_id/개인 로그인)를 덮어쓰고, 관리자 로그아웃
+# (session.clear())이 그것마저 지워버린다. 실측: 관리자 로그인→로그아웃 직후 공용 화면에서 보던 대화가
+# 404가 되고, 이어서 보낸 질문이 새 작업으로 따로 저장됨("이전 대화기록이 삭제됐어"로 보고됨).
+if ADMIN_MODE:
+    app.config["SESSION_COOKIE_NAME"] = "wikibot_admin_session"
+
 _ADMIN_LOGIN_PAGE = """
 <!doctype html>
-<html lang="ko"><head><meta charset="utf-8"><title>위키봇 관리자 로그인</title>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>위키봇 관리자 로그인</title>
+<script>try{var t=localStorage.getItem('theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<link rel="stylesheet" href="/static/app.css">
 <style>
-  body { font-family: -apple-system, sans-serif; background: #FAF9F5; color: #3D3929;
-         display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-  form { background: #FFFFFF; border: 1px solid #E5E3DA; padding: 2rem 2.5rem; border-radius: 12px;
-         width: 280px; box-shadow: 0 2px 10px rgba(61,57,41,.06); }
-  h1 { font-size: 1.1rem; margin: 0 0 1.2rem; }
-  input { width: 100%; box-sizing: border-box; padding: 0.6rem 0.7rem; margin-bottom: 0.8rem;
-          border-radius: 6px; border: 1px solid #E5E3DA; background: #FFFFFF; color: #3D3929; }
-  button { width: 100%; padding: 0.6rem; border: none; border-radius: 6px; background: #C15F3C;
-           color: #FFFFFF; font-weight: 600; cursor: pointer; }
-  .err { color: #B23B3B; font-size: 0.85rem; margin-bottom: 0.8rem; }
+  body { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 16px; }
+  .login-card { width: min(360px, 100%); }
+  .login-card .brand { margin-bottom: 18px; }
+  .login-card h1 { margin: 0 0 4px; font-size: 22px; letter-spacing: -.035em; }
+  .login-card p { margin: 0 0 18px; color: var(--fg-muted); font-size: 13px; }
+  .login-card .btn { width: 100%; margin-top: 6px; }
 </style></head>
 <body>
-  <form method="post">
-    <h1>위키봇 관리자 로그인</h1>
-    {% if error %}<div class="err">{{ error }}</div>{% endif %}
-    <input name="username" placeholder="아이디" autofocus>
-    <input name="password" type="password" placeholder="비밀번호">
-    <button type="submit">로그인</button>
+  <form method="post" class="modal login-card">
+    <div class="brand"><span>Q</span><strong>cells EMS Wiki</strong><small>admin</small></div>
+    <h1>관리자 로그인</h1>
+    <p>전체 대화와 실행 기록을 보는 관리자 화면입니다.</p>
+    {% if error %}<div class="form-status" style="margin-bottom:10px">{{ error }}</div>{% endif %}
+    <div class="field"><label>아이디</label><input name="username" autofocus autocomplete="username"></div>
+    <div class="field"><label>비밀번호</label><input name="password" type="password" autocomplete="current-password"></div>
+    <button type="submit" class="btn solid">로그인</button>
   </form>
 </body></html>
 """
@@ -133,7 +150,8 @@ def _check_admin_credentials(username, password):
 if ADMIN_MODE:
     @app.before_request
     def _require_admin_login():
-        if request.path in _ADMIN_LOGIN_EXEMPT_PATHS or request.path.startswith("/confluence-images/") or request.path.startswith("/wiki-images/"):
+        if (request.path in _ADMIN_LOGIN_EXEMPT_PATHS or request.path.startswith("/confluence-images/")
+                or request.path.startswith("/wiki-images/") or request.path.startswith("/static/")):
             return None
         if not session.get("admin"):
             return redirect(url_for("admin_login", next=request.path))
@@ -146,7 +164,7 @@ if ADMIN_MODE:
             if _check_admin_credentials(request.form.get("username", ""), request.form.get("password", "")):
                 session.permanent = True
                 session["admin"] = True
-                return redirect(request.args.get("next") or url_for("index"))
+                return redirect(request.args.get("next") or url_for("admin_home"))
             error = "아이디 또는 비밀번호가 올바르지 않습니다."
         return render_template_string(_ADMIN_LOGIN_PAGE, error=error)
 
@@ -155,200 +173,57 @@ if ADMIN_MODE:
         session.clear()
         return redirect(url_for("admin_login"))
 
-    # 관리자 대시보드(2026-09-22 신규) — 예전엔 --admin이 "같은 채팅 UI에 로그인만 추가"였는데,
-    # 이제 관리자의 역할이 "직접 채팅"에서 "가입한 사용자 계정(아이디/비밀번호 평문)과 그들의
-    # 대화 목록을 열람"으로 바뀌어서 index()가 이 화면으로 리다이렉트된다. 서버 렌더링 HTML로
-    # 충분히 단순해서 별도 SPA 없이 Jinja render_template_string만 쓴다.
-    _ADMIN_STYLE = """
-    <style>
-      body { font-family: -apple-system, sans-serif; background: #FAF9F5; color: #3D3929; margin: 0; padding: 2rem 2.5rem; }
-      h1 { font-size: 1.3rem; margin: 0 0 0.3rem; }
-      .sub { color: #83807A; font-size: 0.85rem; margin-bottom: 1.4rem; }
-      a { color: #C15F3C; text-decoration: none; }
-      a:hover { text-decoration: underline; }
-      table { border-collapse: collapse; width: 100%; margin-bottom: 1.5rem; background: #FFFFFF;
-        border: 1px solid #E5E3DA; border-radius: 10px; overflow: hidden; }
-      th, td { text-align: left; padding: 0.55rem 0.8rem; border-bottom: 1px solid #E5E3DA; font-size: 0.9rem; }
-      th { color: #83807A; font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.03em; }
-      tr:hover td { background: #F0EEE6; }
-      .topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.2rem; }
-      .topbar nav a { margin-right: 1rem; color: #3D3929; font-weight: 600; }
-      .topbar nav a:hover { color: #C15F3C; }
-      .logout-form button { background: #FFFFFF; color: #3D3929; border: 1px solid #E5E3DA; border-radius: 6px;
-        padding: 0.4rem 0.8rem; cursor: pointer; }
-      .logout-form button:hover { border-color: #C15F3C; }
-      .empty { color: #83807A; font-style: italic; padding: 1rem 0; }
-      .pw { font-family: Consolas, monospace; }
-      .msg { border-bottom: 1px solid #E5E3DA; padding: 0.9rem 0; }
-      .msg .role { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; color: #83807A; margin-bottom: 0.3rem; }
-      .msg .content { white-space: pre-wrap; line-height: 1.5; }
-      .msg .sources { margin-top: 0.4rem; font-size: 0.8rem; color: #83807A; }
-      .actions button { background: #FDEDEB; color: #B23B3B; border: 1px solid #F0CFC9; border-radius: 6px;
-        padding: 0.4rem 0.8rem; cursor: pointer; margin-right: 0.5rem; }
-      .actions button.restore { background: #EAF4EA; color: #2E7D32; border-color: #CFE8CF; }
-    </style>
-    """
+    # 관리자 대시보드 — 2026-09-22에 Jinja 서버 렌더링 페이지(사용자/비로그인/대화 목록/상세)로
+    # 처음 만들었다가, 2026-10-07 expharness의 "전체 작업"(/projects)·"공개 기록"(/history/<id>)
+    # 화면을 벤치마킹해 static/admin.html 단일 페이지로 다시 만들었다. 서버는 JSON만 내려주고,
+    # 화면은 대화 화면과 같은 static/app.css·markdown.js를 공유한다. 이제 대화마다 실행 기록
+    # (runs — 검색 단계, 모델 비교·채택 판정)까지 같이 보이므로 "누가 무엇을 물었고 봇이 어떤
+    # 과정을 거쳐 답했는지"를 한 화면에서 재생할 수 있다.
+    @app.route("/admin")
+    def admin_home():
+        return send_from_directory(STATIC_DIR, "admin.html")
 
-    _ADMIN_TOPBAR = """
-    <div class="topbar">
-      <nav>
-        <a href="{{ url_for('admin_users') }}">사용자</a>
-        <a href="{{ url_for('admin_anonymous') }}">비로그인</a>
-      </nav>
-      <form class="logout-form" method="post" action="{{ url_for('admin_logout') }}">
-        <button type="submit">로그아웃</button>
-      </form>
-    </div>
-    """
-
-    _ADMIN_USERS_PAGE = """
-    <!doctype html><html lang="ko"><head><meta charset="utf-8"><title>위키봇 관리자 - 사용자</title>""" + _ADMIN_STYLE + """
-    </head><body>""" + _ADMIN_TOPBAR + """
-      <h1>가입 사용자 ({{ users|length }}명)</h1>
-      <div class="sub">아이디/비밀번호는 이 도구가 사내 LAN 전용으로만 노출된다는 전제로 평문 저장됩니다.</div>
-      {% if users %}
-      <table>
-        <tr><th>아이디</th><th>비밀번호</th><th>가입일</th><th>대화 수</th><th>관리</th></tr>
-        {% for u in users %}
-        <tr>
-          <td><a href="{{ url_for('admin_user_conversations', user_id=u.id) }}">{{ u.username }}</a></td>
-          <td class="pw">{{ u.password }}</td>
-          <td>{{ u.created_at }}</td>
-          <td>{{ u.conversation_count }}</td>
-          <td class="actions">
-            <form method="post" action="{{ url_for('admin_user_delete', user_id=u.id) }}"
-                  onsubmit="return confirm('{{ u.username }} 계정과 대화 {{ u.conversation_count }}건을 완전히 삭제합니다. 되돌릴 수 없습니다. 계속할까요?');" style="display:inline">
-              <button type="submit">계정 삭제</button>
-            </form>
-          </td>
-        </tr>
-        {% endfor %}
-      </table>
-      {% else %}
-      <div class="empty">아직 가입한 사용자가 없습니다.</div>
-      {% endif %}
-    </body></html>
-    """
-
-    _ADMIN_CONV_LIST_PAGE = """
-    <!doctype html><html lang="ko"><head><meta charset="utf-8"><title>{{ heading }} - 위키봇 관리자</title>""" + _ADMIN_STYLE + """
-    </head><body>""" + _ADMIN_TOPBAR + """
-      <h1>{{ heading }}</h1>
-      <div class="sub"><a href="{{ back_url }}">← 목록으로</a></div>
-      {% if conversations %}
-      <table>
-        <tr><th>제목</th><th>생성일</th><th>수정일</th><th>상태</th></tr>
-        {% for c in conversations %}
-        <tr>
-          <td><a href="{{ url_for('admin_conversation_detail', conversation_id=c.id) }}">{{ c.title }}</a></td>
-          <td>{{ c.created_at }}</td>
-          <td>{{ c.updated_at }}</td>
-          <td>{{ '삭제됨' if c.deleted_at else '' }}</td>
-        </tr>
-        {% endfor %}
-      </table>
-      {% else %}
-      <div class="empty">대화가 없습니다.</div>
-      {% endif %}
-    </body></html>
-    """
-
-    _ADMIN_ANON_LIST_PAGE = """
-    <!doctype html><html lang="ko"><head><meta charset="utf-8"><title>위키봇 관리자 - 비로그인</title>""" + _ADMIN_STYLE + """
-    </head><body>""" + _ADMIN_TOPBAR + """
-      <h1>비로그인 방문자 ({{ sessions|length }}개 세션)</h1>
-      <div class="sub">로그인하지 않고 공용 페이지에서 대화한 방문자들 — 브라우저 세션 단위로 묶여 있고 계정과는 무관합니다.</div>
-      {% if sessions %}
-      <table>
-        <tr><th>세션</th><th>대화 수</th><th>최근 활동</th></tr>
-        {% for s in sessions %}
-        <tr>
-          <td><a href="{{ url_for('admin_anon_conversations', anon_id=s.anon_session_id) }}">{{ s.anon_session_id[:12] }}…</a></td>
-          <td>{{ s.conversation_count }}</td>
-          <td>{{ s.last_activity }}</td>
-        </tr>
-        {% endfor %}
-      </table>
-      {% else %}
-      <div class="empty">비로그인 대화가 없습니다.</div>
-      {% endif %}
-    </body></html>
-    """
-
-    _ADMIN_CONV_DETAIL_PAGE = """
-    <!doctype html><html lang="ko"><head><meta charset="utf-8"><title>{{ conv.title }} - 위키봇 관리자</title>""" + _ADMIN_STYLE + """
-    </head><body>""" + _ADMIN_TOPBAR + """
-      <h1>{{ conv.title }}</h1>
-      <div class="sub"><a href="{{ back_url }}">← 목록으로</a> · 생성 {{ conv.created_at }} · 수정 {{ conv.updated_at }}
-        {% if conv.deleted_at %} · <strong>삭제됨({{ conv.deleted_at }})</strong>{% endif %}</div>
-      {% for m in conv.messages %}
-      <div class="msg">
-        <div class="role">{{ '질문' if m.role == 'user' else '답변' }}</div>
-        <div class="content">{{ m.content }}</div>
-        {% if m.sources %}
-        <div class="sources">출처: {% for s in m.sources %}<a href="{{ s.url }}" target="_blank">{{ s.label }}</a>{{ ', ' if not loop.last }}{% endfor %}</div>
-        {% endif %}
-      </div>
-      {% endfor %}
-      <div class="actions" style="margin-top:1.2rem;">
-        {% if conv.deleted_at %}
-        <form method="post" action="{{ url_for('conversation_restore', conversation_id=conv.id) }}" style="display:inline">
-          <button type="submit" class="restore">복원</button>
-        </form>
-        {% else %}
-        <form method="post" action="{{ url_for('conversation_delete', conversation_id=conv.id) }}" onsubmit="event.preventDefault(); fetch(this.action, {method:'DELETE'}).then(()=>location.reload());" style="display:inline">
-          <button type="submit">소프트 삭제</button>
-        </form>
-        {% endif %}
-        <form onsubmit="event.preventDefault(); if(confirm('완전히 삭제합니다. 되돌릴 수 없습니다. 계속할까요?')) fetch('{{ url_for('conversation_purge', conversation_id=conv.id) }}', {method:'DELETE'}).then(()=>location.href='{{ back_url }}');" style="display:inline">
-          <button type="submit">완전 삭제</button>
-        </form>
-      </div>
-    </body></html>
-    """
-
+    # 예전 Jinja 화면 주소로 들어와도 새 화면의 해당 탭으로 보낸다(북마크 호환).
     @app.route("/admin/users")
     def admin_users():
-        return render_template_string(_ADMIN_USERS_PAGE, users=chat_history.list_users())
-
-    @app.route("/admin/users/<int:user_id>/delete", methods=["POST"])
-    def admin_user_delete(user_id):
-        chat_history.delete_user(user_id)
-        return redirect(url_for("admin_users"))
-
-    @app.route("/admin/users/<int:user_id>/conversations")
-    def admin_user_conversations(user_id):
-        user = chat_history.get_user_by_id(user_id)
-        if user is None:
-            return jsonify({"error": "사용자를 찾을 수 없습니다."}), 404
-        convs = chat_history.list_conversations(limit=500, include_deleted=True, user_id=user_id)
-        return render_template_string(
-            _ADMIN_CONV_LIST_PAGE, heading=f"{user['username']}님의 대화", conversations=convs,
-            back_url=url_for("admin_users"),
-        )
+        return redirect("/admin#/users")
 
     @app.route("/admin/anonymous")
     def admin_anonymous():
-        return render_template_string(_ADMIN_ANON_LIST_PAGE, sessions=chat_history.list_anon_sessions())
-
-    @app.route("/admin/anonymous/<anon_id>/conversations")
-    def admin_anon_conversations(anon_id):
-        convs = chat_history.list_conversations(limit=500, include_deleted=True, anon_session_id=anon_id)
-        return render_template_string(
-            _ADMIN_CONV_LIST_PAGE, heading=f"비로그인 세션 {anon_id[:12]}…의 대화", conversations=convs,
-            back_url=url_for("admin_anonymous"),
-        )
+        return redirect("/admin#/records?owner=anon")
 
     @app.route("/admin/conversations/<conversation_id>")
     def admin_conversation_detail(conversation_id):
+        return redirect(f"/admin#/history/{conversation_id}")
+
+    @app.route("/admin/api/overview")
+    def admin_api_overview():
+        convs = chat_history.list_conversations_overview()
+        for c in convs:
+            c["owner"] = c["username"] or (
+                "예전 대화(계정 도입 전)" if c["anon_session_id"] == "legacy-pre-login"
+                else f"비로그인 {(c['anon_session_id'] or '')[:8]}"
+            )
+            c["owner_kind"] = "user" if c["user_id"] else "anon"
+        return jsonify({"conversations": convs, "users": chat_history.list_users()})
+
+    @app.route("/admin/api/conversations/<conversation_id>")
+    def admin_api_conversation(conversation_id):
         conv = chat_history.get_conversation(conversation_id, include_deleted=True)
         if conv is None:
             return jsonify({"error": "대화를 찾을 수 없습니다."}), 404
+        owner = None
         if conv.get("user_id"):
-            back_url = url_for("admin_user_conversations", user_id=conv["user_id"])
-        else:
-            back_url = url_for("admin_anon_conversations", anon_id=conv.get("anon_session_id") or "")
-        return render_template_string(_ADMIN_CONV_DETAIL_PAGE, conv=conv, back_url=back_url)
+            u = chat_history.get_user_by_id(conv["user_id"])
+            owner = u["username"] if u else f"삭제된 계정 #{conv['user_id']}"
+        conv["owner"] = owner or f"비로그인 {(conv.get('anon_session_id') or '')[:8]}"
+        conv["runs"] = chat_history.list_runs_for_conversation(conversation_id)
+        return jsonify(conv)
+
+    @app.route("/admin/api/users/<int:user_id>/delete", methods=["POST"])
+    def admin_api_user_delete(user_id):
+        chat_history.delete_user(user_id)
+        return jsonify({"ok": True})
 
 # 일반 사용자 계정 로그인(공용 인스턴스 전용, 2026-09-22 신규) — ADMIN_MODE의 관리자
 # 세션(session["admin"])과는 완전히 별개 키(session["user_id"]/["username"])를 쓴다.
@@ -472,7 +347,10 @@ Confluence 문서를 배경지식으로 삼아 답하는 개발 어시스턴트�
     ```
 - 답변 마지막에 참고한 출처를 나열할 때, 각 참고 자료 블록 첫 줄에 있는 실제 URL을 그대로 써서
   마크다운 하이퍼링크 `[출처명](URL)` 형식으로 작성하세요. `[[출처명]]`처럼 URL 없는 이중 대괄호
-  형식은 클릭할 수 없으니 쓰지 마세요. 참고 자료에 없는 URL을 지어내는 것도 절대 금지입니다"""
+  형식은 클릭할 수 없으니 쓰지 마세요. 참고 자료에 없는 URL을 지어내는 것도 절대 금지입니다
+- 출처가 "업로드 파일"인 참고 자료는 사용자가 이 대화에 직접 첨부한 파일입니다. 질문이 그 파일(로그,
+  설정, 표, 문서 등)에 관한 것이면 위키 검색 결과보다 첨부 파일을 우선 근거로 삼으세요. 첨부 파일은
+  링크가 없으므로 출처는 `(첨부: 파일명)`처럼 이름만 적으세요"""
 
 
 def _load_confluence_env():
@@ -710,6 +588,9 @@ def _parse_xlsx_text(xlsx_bytes):
             out.append(block)
             total += len(block)
     return "\n\n".join(out) if out else None
+
+
+file_store.XLSX_PARSER = _parse_xlsx_text  # 업로드된 xlsx도 같은 무의존성 파서로 읽는다
 
 
 def _confluence_rest_headers():
@@ -1023,6 +904,22 @@ _PERSON_DOC_LISTALL_RE = re.compile(r"(다|전부|모두)\s*(찾아|보여|알�
 # 정규식과 달리 사람 이름을 오인할 여지 있는 일반 명사가 아니므로 정규식으로도
 # 안전하다.
 _JIRA_TICKET_RE = re.compile(r"(jira|지라)", re.IGNORECASE)
+# 팀 전체 Jira 집계 판별(2026-10-07 추가) — "EnergySW 파트에서 jira 티켓이 가장 많이 할당된 사람은?
+# assign" 질문이 팀 명단 집계 분기로 갔는데, 그 분기는 Confluence 작성 문서 수만 세서 "Jira 할당
+# 집계가 없다"고 답하고 출처에도 Jira가 없었다(사용자 지적: "jira 연동하기로 했잖아"). 인물 한
+# 명용 _JIRA_TICKET_RE 판별과 같은 원칙으로, jira/지라 + 티켓·이슈·할당·assign이 같이 나오면
+# Jira 할당 수 집계로 보낸다.
+_JIRA_ASSIGN_WORDS_RE = re.compile(r"(티켓|이슈|할당|assign)", re.IGNORECASE)
+_JIRA_TICKET_WORD_RE = re.compile(r"(티켓|ticket)", re.IGNORECASE)
+# "가장 많이 할당된 사람"처럼 팀 내 순위를 묻는 표현 — expanded_wants_stats(LLM 판단)가 가끔 놓쳐도
+# Jira 팀 집계로 보내기 위한 값싼 안전망(Jira 할당 질문과 함께 나올 때만 쓰인다).
+_TEAM_RANK_RE = re.compile(r"(가장|제일|누가|순위|랭킹|top|많이)", re.IGNORECASE)
+
+
+def _jira_assigned_jql_url(account_id):
+    """그 사람에게 할당된 진행 중 이슈 목록을 Jira에서 바로 여는 링크(출처 카드용)."""
+    jql = f'assignee = "{account_id}" AND statusCategory != Done AND status != Cancelled ORDER BY priority DESC'
+    return f"https://{ATLASSIAN_SITE}/issues/?jql=" + urllib.parse.quote(jql)
 
 
 def _rovo_search_query(query, extra_terms=None):
@@ -1055,7 +952,8 @@ def _rovo_search_query(query, extra_terms=None):
 # 들쭉날쭉해지는 게 실측됨(같은 질문인데 어떤 실행은 소스 7개, 어떤 실행은 4개). 득보다
 # 실이 커서 원래의 "원본+확장 2회 검색"으로 되돌림 — 결과가 빈약한 케이스는 재시도 루프
 # 대신 [[project_wikibot_architecture]]에 기록된 다른 방식(개인 스페이스 라벨링 등)으로 보완.
-def build_context(question, history=None):
+def build_context(question, history=None, tracer=None):
+    tr = tracer or Tracer()  # 작업대 단계 표시용(호출부가 안 넘기면 기록만 하고 버린다)
     # 로컬 위키(docs/*.md, "1.1 ~ 24.6" 번호 체계)는 사용자 확정으로 답변 소스에서
     # 완전히 제외 — 라이브 Confluence 페이지만 근거로 쓴다(실측: 로컬 위키 청크가
     # 질문과 느슨하게만 연관된 범용 아키텍처 문서를 끌어와 답변이 부정확해짐).
@@ -1088,7 +986,16 @@ def build_context(question, history=None):
     # 있던 자리)에서 쓴다. 네 번째 값 expanded_wants_stats는 "누가 가장 많이
     # 썼어"류 개수/순위/전체목록 질문 판별을 정규식 대신 이 LLM 판단에도 같이
     # 맡긴 것(2026-09-22, 아래 _PERSON_DOC_COUNT_RE 근처 설명 참고).
-    original_query, expanded_keywords, expanded_person, expanded_wants_stats = _expand_search_query(question, history)
+    with tr.step("expand", "질문 분석 · 검색어 확장") as st:
+        original_query, expanded_keywords, expanded_person, expanded_wants_stats = _expand_search_query(question, history)
+        st.items = [f"확장 키워드: {expanded_keywords}"]
+        if expanded_person:
+            st.items.append(f"지목된 인물: {expanded_person}")
+        if expanded_wants_stats:
+            st.items.append("개수·순위·목록 질문으로 판단")
+        st.detail = "핵심 검색어 “{}”".format(
+            " ".join(t for t in original_query.split() if t not in _GENERIC_KO_WORDS) or original_query
+        )
     # claude -p는 같은 지시에도 매번 똑같이 순종하지 않는다(샘플링 비결정성, 위
     # _expand_search_query_llm_call 주석 참고) — 실측: "장승혁 프로가 누구야"를 여러 번
     # 물으면 대부분 core="장승혁"으로 깨끗하게 나오지만, 가끔 "장승혁 프로가 누구야"를
@@ -1111,21 +1018,55 @@ def build_context(question, history=None):
     # 전부 정답 문서를 Rovo 1위로 정확히 찾음 — 그래서 원본 질의를 신뢰의 기준으로 삼고,
     # 확장 질의는 "동작원리→architecture"류(실측 검증된 이득)의 동의어 보완 용도로만
     # 추가한다(2026-08-19, "gem net id" 케이스로 재현/수정).
-    live_pages = rovo_search(original_query, limit=3)
+    # Jira 할당 질문이면 Rovo 문서 검색을 건너뛰고 바로 Jira를 조회한다(2026-10-07, 사용자 지적:
+    # "작업 단계에서도 rovo가 아닌 jira를 탐색해야되는거 아냐?"). 할당 수/목록은 Rovo 본문 검색으로는
+    # 나오지 않는 정보라, Rovo 2회(약 15초)는 시간만 쓰고 무관한 Confluence 문서 수십 건을 참고 자료에
+    # 섞었다(실측: 참고 자료 24건 · 3.5만 자). 인물 한 명(아래 anchor 분기의 wants_jira_tickets)과 팀
+    # 전체(아래 명단 분기의 wants_team_jira) 둘 다 해당. 계정을 못 찾는 등으로 Jira 결과가 비면 맨
+    # 아래 CQL 폴백이 그대로 돈다.
+    # "티켓"은 이 조직에선 곧 Jira 티켓이라 단독으로도 Jira 질문으로 본다(실측: "심철로된 티켓 알려줘.
+    # 우선순위별"에 jira라는 단어가 없어 Confluence 작성 문서로 답함). 이슈·할당·assign은 일반 단어로도
+    # 쓰이므로 jira/지라와 같이 나올 때만 인정한다.
+    jira_assign_intent = bool(_JIRA_TICKET_WORD_RE.search(question)) or (
+        bool(_JIRA_TICKET_RE.search(question)) and bool(_JIRA_ASSIGN_WORDS_RE.search(question))
+    )
+    team_stats_intent = bool(
+        expanded_wants_stats or _PERSON_DOC_COUNT_RE.search(question) or _PERSON_DOC_LISTALL_RE.search(question)
+        # 순위 표현은 Jira 할당 질문일 때만 추가로 인정(일반 질문의 "누가"까지 3분짜리 명단 집계로 보내지 않게)
+        or (jira_assign_intent and _TEAM_RANK_RE.search(question))
+    )
+    jira_direct = jira_assign_intent and (bool(expanded_person) or team_stats_intent)
+    if jira_direct:
+        live_pages = []
+        tr.note("search", "Rovo 검색 (Confluence·Jira 본문)", "Jira 할당 질문이라 문서 검색은 건너뛰고 Jira를 직접 조회합니다", status="skip")
+    else:
+        with tr.step("search", "Rovo 검색 · 원본 질의") as st:
+            live_pages = rovo_search(original_query, limit=3)
+            st.detail = f"{len(live_pages)}건"
+            st.items = [p["title"] for p in live_pages]
     using_rovo = bool(live_pages)
     for p in live_pages:
         p["source"] = "rovo"
 
-    if using_rovo and expanded_keywords.strip() != original_query.strip():
-        expanded_pages = rovo_search(
-            _rovo_search_query(expanded_keywords, extra_terms=original_terms), limit=3, two_hop=False
-        )
-        seen_urls = {p["url"] for p in live_pages}
-        for p in expanded_pages:
-            if p["url"] not in seen_urls:
-                p["source"] = "rovo"
-                live_pages.append(p)
-                seen_urls.add(p["url"])
+    if jira_direct:
+        pass
+    elif using_rovo and expanded_keywords.strip() != original_query.strip():
+        with tr.step("search_expanded", "Rovo 검색 · 확장 질의") as st:
+            expanded_pages = rovo_search(
+                _rovo_search_query(expanded_keywords, extra_terms=original_terms), limit=3, two_hop=False
+            )
+            seen_urls = {p["url"] for p in live_pages}
+            added_titles = []
+            for p in expanded_pages:
+                if p["url"] not in seen_urls:
+                    p["source"] = "rovo"
+                    live_pages.append(p)
+                    seen_urls.add(p["url"])
+                    added_titles.append(p["title"])
+            st.detail = f"{len(expanded_pages)}건 중 새 문서 {len(added_titles)}건"
+            st.items = added_titles
+    else:
+        tr.note("search_expanded", "Rovo 검색 · 확장 질의", "원본 질의와 같아 건너뜀" if using_rovo else "Rovo 응답 없음 — CQL 폴백 예정", status="skip")
 
     # 인물 질문 보강: 질문에 한글 이름이 있으면 그 이름이 제목에 들어간 Confluence
     # 문서를 CQL title ~ 검색으로 직접, 결정적으로 찾아 작성자 계정(author_id)을
@@ -1164,6 +1105,7 @@ def build_context(question, history=None):
     # 성공할 때마다 그 계정의 실제 표시 이름까지 자동으로 기억해두므로, 예를 들어
     # "장승혁"으로 먼저 한 번 찾아진 뒤로는 "jack jang이 누구야"만 물어도 코드
     # 수정 없이 바로 풀린다(이름별 수작업이 아니라 실제 조회 결과 재사용).
+    person_started = time.monotonic()
     cached = lookup_cached_person_in_text(question) or lookup_cached_person_in_text(expanded_keywords)
     if cached:
         anchor_author_id, anchor_author_name = cached
@@ -1198,6 +1140,14 @@ def build_context(question, history=None):
                 anchor_author_id, anchor_author_name = find_author_id_by_title(retried_person)
     else:
         anchor_author_id = anchor_author_name = None
+    if cached or expanded_person:
+        tr.note(
+            "person", "인물 계정 확인",
+            f"{anchor_author_name or expanded_person} → 계정 확인" if anchor_author_id else f"“{expanded_person}” 계정을 찾지 못함",
+            status="done" if anchor_author_id else "error",
+            items=["이전에 찾은 인물 캐시 사용"] if cached else None,
+            ms=int((time.monotonic() - person_started) * 1000),
+        )
 
     person_count_note = None  # wants_full_list일 때만 채워짐, parts에 별도로 붙임(아래 참고)
     if anchor_author_id:
@@ -1207,11 +1157,11 @@ def build_context(question, history=None):
         # "정확히" 매칭하므로(search_jira_mentions()의 text~ 다수결/LLM 판단과
         # 달리) anchor_author_id만 맞으면 그대로 신뢰할 수 있다. Confluence
         # 개수/목록 로직과 섞이지 않게 먼저 분기해서 처리하고 아래로 안 내려간다.
-        wants_jira_tickets = bool(_JIRA_TICKET_RE.search(question)) and (
-            "티켓" in question or "이슈" in question
-        )
+        wants_jira_tickets = jira_assign_intent  # 위 jira_direct 판단과 같은 기준(티켓·이슈·할당·assign)
         if wants_jira_tickets:
-            tickets, is_complete = search_jira_assigned(anchor_author_id)
+            with tr.step("jira", "Jira 담당 이슈 검색") as st:
+                tickets, is_complete = search_jira_assigned(anchor_author_id)
+                st.detail = f"진행 중 이슈 {len(tickets)}건" + ("" if is_complete else " (상한 도달)")
             display_name = anchor_author_name
             note = (
                 f"[참고: Jira에서 {display_name or '이 인물'}님에게 assignee로 할당된 "
@@ -1262,7 +1212,9 @@ def build_context(question, history=None):
                 or _PERSON_DOC_LISTALL_RE.search(question)
             )
             creator_limit = 200 if wants_full_list else 10
-            author_pages, author_display_name = search_by_creator(anchor_author_id, limit=creator_limit)
+            with tr.step("creator", "작성자 문서 검색 (CQL)") as st:
+                author_pages, author_display_name = search_by_creator(anchor_author_id, limit=creator_limit)
+                st.detail = f"{len(author_pages)}건" + (" · 전수 집계" if wants_full_list else " · 예시용 상위만 사용")
             author_display_name = author_display_name or anchor_author_name
             seen_urls = {p["url"] for p in live_pages}
 
@@ -1309,7 +1261,7 @@ def build_context(question, history=None):
                     added += 1
                     if added >= 6:  # 발췌만 쓰지만 소스 목록이 너무 길어지지 않게 상한
                         break
-    elif expanded_wants_stats or _PERSON_DOC_COUNT_RE.search(question) or _PERSON_DOC_LISTALL_RE.search(question):
+    elif team_stats_intent:
         # anchor_author_id가 없다는 건(위 elif expanded_person 분기를 안 탔다는 뜻)
         # 질문이 특정 인물 한 명을 지목한 게 아니라는 뜻인데(query_expansion.py의
         # person 필드가 null), 그런데도 "몇 개/다 보여줘"·"가장 많이 쓴 사람" 같은
@@ -1331,8 +1283,54 @@ def build_context(question, history=None):
         # search_confluence_live 근처 주석 참고: "인원/조직 데이터처럼 실수가
         # 그대로 신뢰 문제로 이어지는 내용을 다루므로... 정확성이 우선". 같은
         # 원칙이 여기 인원별 집계에도 그대로 적용된다).
+        roster_started = time.monotonic()
         roster = get_energysw_roster()
-        if roster:
+        wants_team_jira = jira_assign_intent
+        if roster and wants_team_jira:
+            # 팀 전체 Jira 할당 순위 — 인원별로 계정을 찾고, assignee = 계정인 진행 중 이슈 수를 센다.
+            # 인물 한 명용 분기(search_jira_assigned)와 같은 정의(완료·취소 제외)를 그대로 쓴다.
+            tr.push({"type": "step", "key": "jira_roster", "label": "팀 명단 인원별 Jira 할당 집계", "status": "running",
+                     "detail": f"{len(roster)}명 순회 중"})
+            rows = []
+            for person_name in roster:
+                pid, pdisplay = find_author_id_by_title(person_name)
+                if not pid:
+                    rows.append((person_name, None, None, True))
+                    continue
+                tickets, is_complete = search_jira_assigned(pid)
+                # 명단의 한글 이름을 앞에, Atlassian 표시 이름(영문 계정명)을 괄호로 — 답변에서 누군지 바로 알아보게
+                shown = person_name if not pdisplay or pdisplay == person_name else f"{person_name}({pdisplay})"
+                rows.append((shown, pid, len(tickets), is_complete))
+            rows.sort(key=lambda r: -(r[2] or 0))
+            lines = []
+            seen_urls = {p["url"] for p in live_pages}
+            for name_shown, pid, cnt, complete in rows:
+                if pid is None:
+                    lines.append(f"- {name_shown}: 계정을 찾지 못해 확인 불가")
+                    continue
+                url = _jira_assigned_jql_url(pid)
+                lines.append(f"- {name_shown}: 진행 중 할당 {cnt}건" + ("" if complete else " 이상(상한 도달)") + f" | URL: {url}")
+                if cnt and url not in seen_urls:
+                    live_pages.append({
+                        "title": f"{name_shown} — Jira 진행 중 할당 이슈 {cnt}건" + ("" if complete else "+"),
+                        "url": url, "text": "", "type": "issue", "source": "jira_assigned",
+                        "author_display_name": name_shown,
+                    })
+                    seen_urls.add(url)
+            person_count_note = (
+                f'[참고: Confluence "{_ROSTER_PAGE_TITLE}" 명단({len(roster)}명) 기준으로, 각자에게 '
+                "Jira에서 assignee로 할당된 이슈 중 완료(Done)·취소(Cancelled)를 뺀 진행 중 이슈 수를 "
+                "한 명씩 JQL로 집계한 결과입니다(많은 순). 답변할 때 이 목록을 표/불릿으로 그대로 옮기고 "
+                "숫자를 새로 세거나 바꾸지 마세요. 각 줄의 URL은 그 사람의 진행 중 이슈 목록을 Jira에서 "
+                "여는 링크이니 출처로 그대로 쓰세요. 완료된 과거 이슈까지 포함한 통산 개수가 아니라는 점도 "
+                "밝히세요.]\n" + "\n".join(lines)
+            )
+            tr.note("jira_roster", "팀 명단 인원별 Jira 할당 집계",
+                    f"{len(roster)}명 집계 완료 · 1위 {rows[0][0]} {rows[0][2] or 0}건" if rows else "집계 결과 없음",
+                    ms=int((time.monotonic() - roster_started) * 1000))
+        elif roster:
+            tr.push({"type": "step", "key": "roster", "label": "팀 명단 인원별 집계", "status": "running",
+                     "detail": f"{len(roster)}명 순회 중"})
             rows = []
             for person_name in roster:
                 pid, pdisplay = find_author_id_by_title(person_name)
@@ -1356,17 +1354,27 @@ def build_context(question, history=None):
                 "최소값). 답변할 때 이 목록을 표/불릿으로 그대로 옮기고 숫자를 새로 세거나 "
                 "바꾸지 마세요.]\n" + "\n".join(lines)
             )
+            tr.note("roster", "팀 명단 인원별 집계", f"{len(roster)}명 집계 완료",
+                    ms=int((time.monotonic() - roster_started) * 1000))
+        else:
+            tr.note("roster", "팀 명단 인원별 집계", "명단 문서를 읽지 못함", status="error",
+                    ms=int((time.monotonic() - roster_started) * 1000))
 
     # 본문이 진짜로 비어있는 페이지(다이어그램/엑셀 첨부파일만 있음)는 원본 첨부파일을
     # 직접 파싱해서 보완한다(_fetch_attachment_text 참고, 사용자 확정 2026-08-12).
-    for p in live_pages:
+    empty_pages = [p for p in live_pages if p.get("text") == _EMPTY_BODY_NOTE]
+    attach_started = time.monotonic()
+    attach_items = []
+    for p in empty_pages:
         if p.get("text") == _EMPTY_BODY_NOTE:
             m = _PAGE_ID_IN_URL_RE.search(p.get("url", ""))
             if not m:
                 continue
             extracted_text, source_kind = _fetch_attachment_text(m.group(1))
             if not extracted_text:
+                attach_items.append(f"{p['title']}: 첨부 없음")
                 continue
+            attach_items.append(f"{p['title']}: {source_kind}에서 {len(extracted_text):,}자")
             if source_kind == "drawio 다이어그램":
                 caveat = (
                     "도형 좌표 기준으로 정렬했으나 alt/loop 같은 중첩 프레임 구조상 완벽한 "
@@ -1384,6 +1392,9 @@ def build_context(question, history=None):
                 f"(아래는 {source_kind} 원본(페이지 본문 자체는 비어있음)에서 자동 추출한 "
                 f"내용입니다. {caveat})\n" + extracted_text
             )
+    if empty_pages:
+        tr.note("attachments", "본문 없는 페이지 첨부파일 파싱", f"{len(empty_pages)}개 페이지",
+                items=attach_items, ms=int((time.monotonic() - attach_started) * 1000))
 
     if not using_rovo and not live_pages:
         # `and not live_pages` 추가(2026-09-18) — 원래 `using_rovo`만 보고 폴백하면,
@@ -1399,7 +1410,10 @@ def build_context(question, history=None):
         # live_pages는 안 건드리는 게 맞다.
         # 스페이스를 7개로 넓힌 뒤로 동일 키워드 매치 건수가 훨씬 많아져서(예: "TOU" 20+건)
         # limit=3이면 진짜 관련 문서가 순위 밖으로 밀릴 위험이 커짐 -> 여유 있게 5개
-        live_pages = search_confluence_live(expanded_keywords, limit=5)
+        with tr.step("cql", "Confluence CQL 검색 (폴백)") as st:
+            live_pages = search_confluence_live(expanded_keywords, limit=5)
+            st.detail = f"{len(live_pages)}건"
+            st.items = [p["title"] for p in live_pages]
         for p in live_pages:
             p["source"] = "confluence_cql"
 
@@ -1447,7 +1461,10 @@ def build_context(question, history=None):
     if person_count_note:
         parts.append(person_count_note)
 
-    return "\n\n---\n\n".join(parts), sources
+    context = "\n\n---\n\n".join(parts)
+    tr.note("context", "참고 자료 구성", f"문서 {len(sources)}개 · {len(context):,}자",
+            status="done" if sources else "error")
+    return context, sources
 
 
 OLLAMA_URL = "http://localhost:11434"
@@ -1532,7 +1549,7 @@ def _claude_cli_available():
     return shutil.which("claude") is not None
 
 
-def call_claude_cli(history, context, timeout=180):
+def call_claude_cli(history, context, timeout=180, model="sonnet"):
     messages = _build_messages(history, context)
     # claude -p는 role 배열이 아니라 프롬프트 문자열 하나만 받으므로 이전 대화를
     # 텍스트로 펼쳐서 넣는다 (그림 요청은 보통 짧은 후속 질문이라 부담 적음)
@@ -1542,12 +1559,15 @@ def call_claude_cli(history, context, timeout=180):
         parts.append(f"[{speaker}] {m['content']}")
     parts.append(messages[-1]["content"])
     prompt = "\n\n".join(parts)
+    return _claude_cli_raw(prompt, SYSTEM_PROMPT, model=model, timeout=timeout)
 
+
+def _claude_cli_raw(prompt, system_prompt, model="sonnet", timeout=180):
     cmd = [
         "claude", "-p", prompt,
-        "--model", "sonnet",
+        "--model", model,
         "--output-format", "json",
-        "--system-prompt", SYSTEM_PROMPT,
+        "--system-prompt", system_prompt,
         # --disallowedTools(차단 목록)는 mcp__atlassian__* 같은 MCP 도구는 안 걸러서,
         # 모델이 스스로 그 도구를 호출하려다 비대화형(-p) 모드라 권한 승인을 받지
         # 못하고 막히는 사고가 실측됨("도구 권한이 승인되지 않아... 이 세션은
@@ -1570,7 +1590,21 @@ def generate_answer(history, context, model=None):
     """(답변, backend) 튜플을 반환한다. backend는 _ensure_real_images_shown을
     적용할지 판단하는 데 쓰인다 — claude -p/API는 이미지 유무를 스스로 정확히
     판단하므로 그 판단을 후처리로 덮어쓰면 안 되고, 이 안전장치는 원래 취지대로
-    작은 로컬 모델(ollama) 답변에만 적용해야 한다."""
+    작은 로컬 모델(ollama) 답변에만 적용해야 한다.
+
+    model은 작업대 모델 선택값(model_arena.CLAUDE_MODELS의 "claude:<alias>" 또는
+    "ollama:<이름>")이다. 접두사 없는 예전 값(ollama 모델명)이나 None이면 원래 순서대로
+    claude CLI → API → ollama 폴백을 탄다."""
+    if model and model.startswith("claude:"):
+        alias = model.split(":", 1)[1]
+        if _claude_cli_available():
+            return call_claude_cli(history, context, model=alias, timeout=300 if alias == "opus" else 180), "claude_cli"
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            return call_claude(history, context), "claude_api"
+        raise RuntimeError("claude CLI/ANTHROPIC_API_KEY가 없어 Claude 모델을 쓸 수 없습니다.")
+    if model and model.startswith("ollama:"):
+        return call_ollama(history, context, model.split(":", 1)[1]), "ollama"
+
     if _claude_cli_available():
         try:
             return call_claude_cli(history, context), "claude_cli"
@@ -1591,7 +1625,7 @@ def generate_answer(history, context, model=None):
 @app.route("/")
 def index():
     if ADMIN_MODE:
-        return redirect(url_for("admin_users"))
+        return redirect(url_for("admin_home"))
     # URL은 로그인 여부와 무관하게 항상 하나(/)다 — ChatGPT처럼 신원 구분은 URL이 아니라
     # 세션 쿠키가 한다. 같은 /로 들어와도 로그인된 브라우저는 자기 쿠키 기반으로
     # /api/conversations 등이 자기 데이터만 걸러 보여주고, 로그인 안 한(또는 다른) 브라우저는
@@ -1637,64 +1671,427 @@ def _ensure_real_images_shown(answer, context):
     return f"{answer.rstrip()}\n\n관련 이미지:\n{shown}"
 
 
+JUDGE_MODEL = os.environ.get("WIKIBOT_JUDGE_MODEL", "haiku")
+COMPARE_DEFAULT = [m.strip() for m in os.environ.get("WIKIBOT_COMPARE_MODELS", "claude:sonnet,claude:haiku").split(",") if m.strip()]
+MAX_COMPARE_MODELS = 3
+
+
+def _default_model_id():
+    if _claude_cli_available() or os.environ.get("ANTHROPIC_API_KEY"):
+        return "claude:sonnet"
+    ollama = list_ollama_models()
+    return f"ollama:{ollama[0]}" if ollama else "claude:sonnet"
+
+
 @app.route("/api/models")
 def models():
+    ollama_models = list_ollama_models()
+    claude_ok = _claude_cli_available() or bool(os.environ.get("ANTHROPIC_API_KEY"))
+    catalog = [dict(m, available=claude_ok) for m in model_arena.CLAUDE_MODELS]
+    catalog += [{"id": f"ollama:{n}", "label": n, "note": "로컬 Ollama", "available": True} for n in ollama_models]
     return jsonify({
-        "models": list_ollama_models(),
+        # 예전 프론트 호환 필드
+        "models": ollama_models,
         "default": DEFAULT_OLLAMA_MODEL,
         "claude_available": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        # 작업대용
+        "catalog": catalog,
+        "default_model": _default_model_id(),
+        "compare_default": COMPARE_DEFAULT,
+        "judge_model": model_arena.model_label(f"claude:{JUDGE_MODEL}"),
+        "adopt_margin": model_arena.ADOPT_MARGIN,
     })
+
+
+def _identity():
+    """(user_id, anon_session_id). 관리자 인스턴스는 소유자 구분 없이 (None, None)."""
+    if ADMIN_MODE:
+        return None, None
+    return _current_identity()
+
+
+def _owned_by(row, user_id, anon_id):
+    if ADMIN_MODE:
+        return True
+    if user_id:
+        return row.get("user_id") == user_id
+    return row.get("anon_session_id") == anon_id
+
+
+# 지금 이 서버 프로세스에서 답을 만들고 있는 실행들(run_id -> {"conversation_id", "tracer"}).
+# 페이지를 새로고침하거나 대화를 다시 열어도 진행 중인 답변을 이어서 보여주고(/api/runs/<id>가
+# 여기서 실시간 이벤트를 꺼내 줌), 같은 대화에 질문이 겹쳐 들어오는 것을 막는 데 쓴다.
+# 2026-10-07 실측: 3분 넘게 걸리는 팀 명단 집계 질문 도중 새로고침하면 화면에 진행 표시가 없어
+# 같은 질문을 두 번 더 보내, 한 대화에 같은 질문·답변·실행 기록이 3개씩 쌓였다.
+_LIVE_RUNS = {}
+_LIVE_RUNS_LOCK = threading.Lock()
+
+
+def _live_run_for_conversation(conversation_id):
+    with _LIVE_RUNS_LOCK:
+        for run_id, info in _LIVE_RUNS.items():
+            if info["conversation_id"] == conversation_id:
+                return run_id
+    return None
+
+
+class _ChatError(Exception):
+    def __init__(self, message, code=400):
+        super().__init__(message)
+        self.code = code
+
+
+def _prepare_chat(body, user_id, anon_id):
+    """요청 검증 + 대화 확보까지 동기적으로 처리한다(스트리밍 시작 전에 400/404를 돌려주기 위함)."""
+    history = body.get("history", [])
+    if not history or history[-1].get("role") != "user":
+        raise _ChatError("history의 마지막 메시지는 role=user 여야 합니다.")
+    conversation_id = body.get("conversation_id") or None
+    # 그림 문법 오류로 같은 turn을 더 큰 모델로 재시도하는 호출(프론트 pickEscalationModel) —
+    # 이때는 사용자 메시지를 또 저장하거나 답변 행을 새로 쌓지 않고 직전 답변만 덮어쓴다.
+    retry = bool(body.get("retry"))
+    is_new = not conversation_id
+    if is_new:
+        conversation_id = chat_history.create_conversation(history[-1]["content"], user_id=user_id, anon_session_id=anon_id)
+    else:
+        # 기존 대화에 이어붙이는 경우 — conversation_id를 짐작/재사용해 남의 대화에
+        # 메시지를 끼워넣지 못하도록 소유권을 확인한다.
+        conv = chat_history.get_conversation(conversation_id, include_deleted=True)
+        if conv is None or not _owned_by(conv, user_id, anon_id):
+            raise _ChatError("대화를 찾을 수 없습니다.", 404)
+    run_id = uuid.uuid4().hex
+    with _LIVE_RUNS_LOCK:
+        if any(info["conversation_id"] == conversation_id for info in _LIVE_RUNS.values()):
+            raise _ChatError("이 대화의 이전 질문에 아직 답하는 중입니다. 답변이 끝난 뒤 다시 보내주세요.", 409)
+        _LIVE_RUNS[run_id] = {"conversation_id": conversation_id, "tracer": None}
+
+    model = body.get("model") or None
+    candidates = []
+    if body.get("compare"):
+        candidates = [m for m in (body.get("candidates") or COMPARE_DEFAULT) if isinstance(m, str)]
+        candidates = list(dict.fromkeys(candidates))[:MAX_COMPARE_MODELS]
+        if model and model in candidates:  # 선택한 모델을 기본(현직) 후보로 맨 앞에
+            candidates.remove(model)
+            candidates.insert(0, model)
+    return {
+        "history": history,
+        "conversation_id": conversation_id,
+        "is_new": is_new,
+        "retry": retry,
+        "model": model,
+        "candidates": candidates if len(candidates) >= 2 else [],
+        "file_ids": [f for f in (body.get("file_ids") or []) if isinstance(f, str)][:5],
+        "user_id": user_id,
+        "anon_id": anon_id,
+        "run_id": run_id,
+    }
+
+
+def build_upload_context(file_ids, user_id, anon_id, tracer):
+    """첨부 파일의 추출 텍스트를 참고 자료 블록으로 만든다. 반환: (parts, sources)."""
+    parts, sources = [], []
+    if not file_ids:
+        return parts, sources
+    with tracer.step("uploads", "첨부 파일 읽기") as st:
+        items = []
+        for fid in file_ids:
+            row = chat_history.get_file(fid)
+            if row is None or not _owned_by(row, user_id, anon_id):
+                items.append(f"{fid[:8]}…: 찾을 수 없음")
+                continue
+            text = file_store.read_text(fid)
+            if not text:
+                items.append(f"{row['filename']}: 추출된 텍스트 없음")
+                continue
+            clipped = text[:file_store.CONTEXT_CHARS_PER_FILE]
+            note = "" if len(clipped) == len(text) else f"\n(파일이 길어 앞쪽 {len(clipped):,}자만 포함 — 전체 {len(text):,}자)"
+            parts.append(f"[출처: 업로드 파일 - {row['filename']} (사용자가 대화에 첨부한 파일, 링크 없음)]\n{clipped}{note}")
+            sources.append({"type": "file", "label": row["filename"], "url": None, "file_id": fid})
+            items.append(f"{row['filename']}: {len(clipped):,}자 반영")
+        st.detail = f"{len(parts)}/{len(file_ids)}개 반영"
+        st.items = items
+    return parts, sources
+
+
+def _execute_chat(prep, emit=None):
+    """질문 하나를 끝까지 처리한다(검색 → 생성 → (비교 시) 채택 → 저장). 단계마다 tracer로
+    이벤트를 남기고, 마지막에 run 기록을 저장한 뒤 final dict를 돌려준다."""
+    tracer = Tracer(emit)
+    history = prep["history"]
+    conversation_id = prep["conversation_id"]
+    run_id = prep["run_id"]
+    question = history[-1]["content"]
+    candidates = prep["candidates"]
+    run = {
+        "id": run_id, "conversation_id": conversation_id, "question": question,
+        "mode": "compare" if candidates else "single", "status": "running",
+        "created_at": chat_history._now(),
+    }
+    with _LIVE_RUNS_LOCK:
+        _LIVE_RUNS.setdefault(run_id, {"conversation_id": conversation_id})["tracer"] = tracer
+    try:
+        chat_history.save_run(run)  # 시작 시점에 "running"으로 먼저 남겨 기록 화면에도 진행 중으로 보이게
+    except Exception as e:
+        print(f"⚠️  실행 기록 저장 실패: {e}", file=sys.stderr)
+    tracer.note("receive", "질문 접수", "새 대화" if prep["is_new"] else ("같은 질문 재생성" if prep["retry"] else "이어지는 대화"))
+    if not prep["retry"]:
+        # 질문에도 run_id를 남겨, 실행 기록 1건 삭제 시 질문·답변 한 쌍을 정확히 숨길 수 있게 한다
+        chat_history.add_message(conversation_id, "user", question, run_id=run_id)
+
+    try:
+        # 사용량 한도 초과 상태면 검색/답변 생성(둘 다 claude -p 필요)을 아예 시도하지
+        # 않고 바로 고정 메시지로 응답한다(사용자 요청, 2026-09-18) — build_context도
+        # 검색어 확장/인물 판별에 claude -p를 쓰므로 여기서 걸러야 검색 자체가
+        # "비활성화"된다. usage_guard.py 모듈 독스트링 참고: 정확한 잔여 % 조회는
+        # 불가능해서, 실제 실패를 감지한 뒤 쿨다운 동안만 이렇게 막는 반응형 방식이다.
+        if is_usage_exhausted():
+            tracer.note("usage", "사용량 한도 확인", "한도 소진 — 검색/생성 생략", status="error")
+            answer, sources, adopted, cand_results, verdict = USAGE_EXHAUSTED_MESSAGE, [], None, [], None
+        else:
+            upload_parts, upload_sources = build_upload_context(prep["file_ids"], prep["user_id"], prep["anon_id"], tracer)
+            search_query = _build_search_query(history)
+            context, sources = build_context(search_query, history, tracer)
+            if upload_parts:
+                context = "\n\n---\n\n".join(upload_parts + ([context] if context else []))
+                sources = upload_sources + sources
+
+            if candidates:
+                def _gen(model_id):
+                    return generate_answer(history, context, model_id)[0]
+
+                def _judge(prompt, system):
+                    return _claude_cli_raw(prompt, system, model=JUDGE_MODEL, timeout=150)
+
+                answer, adopted, cand_results, verdict = model_arena.run_arena(
+                    question, context, candidates, _gen, _judge, tracer,
+                    judge_model_label=model_arena.model_label(f"claude:{JUDGE_MODEL}"),
+                )
+                backend = "ollama" if adopted.startswith("ollama:") else "claude"
+            else:
+                model = prep["model"] or _default_model_id()
+                label = model_arena.model_label(model)
+                with tracer.step("generate", f"답변 생성 · {label}") as st:
+                    tracer.push({"type": "candidate", "model": model, "label": label, "status": "running"})
+                    started = time.monotonic()
+                    answer, backend = generate_answer(history, context, model)
+                    ms = int((time.monotonic() - started) * 1000)
+                    tracer.push({"type": "candidate", "model": model, "label": label, "status": "done",
+                                 "ms": ms, "chars": len(answer)})
+                    st.detail = f"{len(answer):,}자"
+                adopted = model
+                cand_results = [{"model": model, "label": label, "status": "done", "ms": ms,
+                                 "chars": len(answer), "decision": "채택"}]
+                verdict = None
+            if backend == "ollama":
+                answer = _ensure_real_images_shown(answer, context)
+            answer = _fix_image_paths(answer)
+
+        with tracer.step("save", "대화·실행 기록 저장"):
+            if prep["retry"]:
+                chat_history.replace_last_message(conversation_id, "assistant", answer, sources, run_id=run_id)
+            else:
+                chat_history.add_message(conversation_id, "assistant", answer, sources, run_id=run_id)
+        run.update(status="done", adopted_model=adopted, candidates=cand_results, verdict=verdict,
+                   sources_count=len(sources))
+        return {
+            "type": "final", "answer": answer, "sources": sources, "conversation_id": conversation_id,
+            "run_id": run_id, "adopted_model": adopted, "candidates": cand_results, "verdict": verdict,
+        }
+    except Exception as e:
+        tracer.push({"type": "error", "error": str(e)[:500]})
+        run.update(status="error")
+        raise
+    finally:
+        run["events"] = tracer.events
+        run["duration_ms"] = tracer.elapsed_ms()
+        try:
+            chat_history.save_run(run)
+        except Exception as e:
+            print(f"⚠️  실행 기록 저장 실패: {e}", file=sys.stderr)
+        with _LIVE_RUNS_LOCK:
+            _LIVE_RUNS.pop(run_id, None)
 
 
 @app.route("/api/chat", methods=["POST"])
 def chat():
     body = request.get_json(force=True) or {}
-    history = body.get("history", [])
-    model = body.get("model") or None
-    conversation_id = body.get("conversation_id") or None
-    # 그림 문법 오류로 같은 turn을 더 큰 모델로 재시도하는 호출(프론트 pickEscalationModel) —
-    # 이때는 사용자 메시지를 또 저장하거나 답변 행을 새로 쌓지 않고 직전 답변만 덮어쓴다.
-    retry = bool(body.get("retry"))
-    if not history or history[-1].get("role") != "user":
-        return jsonify({"error": "history의 마지막 메시지는 role=user 여야 합니다."}), 400
+    user_id, anon_id = _identity()
+    try:
+        prep = _prepare_chat(body, user_id, anon_id)
+        final = _execute_chat(prep)
+    except _ChatError as e:
+        return jsonify({"error": str(e)}), e.code
+    final.pop("type", None)
+    return jsonify(final)
 
-    if not conversation_id:
-        if ADMIN_MODE:
-            conversation_id = chat_history.create_conversation(history[-1]["content"])
-        else:
-            user_id, anon_id = _current_identity()
-            conversation_id = chat_history.create_conversation(history[-1]["content"], user_id=user_id, anon_session_id=anon_id)
-    elif not ADMIN_MODE:
-        # 기존 대화에 이어붙이는 경우 — conversation_id를 짐작/재사용해 남의 대화에
-        # 메시지를 끼워넣지 못하도록 소유권을 확인한다.
-        conv = chat_history.get_conversation(conversation_id, include_deleted=True)
-        if conv is None or not _owns_conversation(conv):
-            return jsonify({"error": "대화를 찾을 수 없습니다."}), 404
-    if not retry:
-        chat_history.add_message(conversation_id, "user", history[-1]["content"])
 
-    # 사용량 한도 초과 상태면 검색/답변 생성(둘 다 claude -p 필요)을 아예 시도하지
-    # 않고 바로 고정 메시지로 응답한다(사용자 요청, 2026-09-18) — build_context도
-    # 검색어 확장/인물 판별에 claude -p를 쓰므로 여기서 걸러야 검색 자체가
-    # "비활성화"된다. usage_guard.py 모듈 독스트링 참고: 정확한 잔여 % 조회는
-    # 불가능해서, 실제 실패를 감지한 뒤 쿨다운 동안만 이렇게 막는 반응형 방식이다.
-    if is_usage_exhausted():
-        chat_history.add_message(conversation_id, "assistant", USAGE_EXHAUSTED_MESSAGE, [])
-        return jsonify({"answer": USAGE_EXHAUSTED_MESSAGE, "sources": [], "conversation_id": conversation_id})
+@app.route("/api/chat/stream", methods=["POST"])
+def chat_stream():
+    """/api/chat과 같은 처리를 하되, 단계 이벤트를 NDJSON(한 줄에 JSON 하나)으로 흘려보낸다.
+    처리는 별도 스레드에서 돌기 때문에 브라우저가 중간에 연결을 끊어도 끝까지 진행돼
+    답변과 실행 기록이 저장된다(다시 열면 기록에서 확인 가능)."""
+    body = request.get_json(force=True) or {}
+    user_id, anon_id = _identity()
+    try:
+        prep = _prepare_chat(body, user_id, anon_id)
+    except _ChatError as e:
+        return jsonify({"error": str(e)}), e.code
 
-    search_query = _build_search_query(history)
-    context, sources = build_context(search_query, history)
-    answer, backend = generate_answer(history, context, model)
-    if backend == "ollama":
-        answer = _ensure_real_images_shown(answer, context)
-    answer = _fix_image_paths(answer)
+    events = queue.Queue()
 
-    if retry:
-        chat_history.replace_last_message(conversation_id, "assistant", answer, sources)
-    else:
-        chat_history.add_message(conversation_id, "assistant", answer, sources)
+    def worker():
+        try:
+            events.put(_execute_chat(prep, emit=events.put))
+        except Exception as e:
+            print(f"⚠️  chat 처리 실패: {e}", file=sys.stderr)
+            events.put({"type": "error", "error": str(e)[:500], "fatal": True})
+        finally:
+            events.put(None)
 
-    return jsonify({"answer": answer, "sources": sources, "conversation_id": conversation_id})
+    threading.Thread(target=worker, daemon=True).start()
+
+    def generate():
+        yield json.dumps({
+            "type": "start", "run_id": prep["run_id"], "conversation_id": prep["conversation_id"],
+            "mode": "compare" if prep["candidates"] else "single", "candidates": prep["candidates"],
+        }, ensure_ascii=False) + "\n"
+        while True:
+            try:
+                ev = events.get(timeout=15)
+            except queue.Empty:
+                yield json.dumps({"type": "ping"}) + "\n"  # 긴 claude -p 호출 동안 연결 유지
+                continue
+            if ev is None:
+                break
+            yield json.dumps(ev, ensure_ascii=False) + "\n"
+
+    return Response(generate(), mimetype="application/x-ndjson",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+def _run_owned(run, user_id, anon_id):
+    conv = chat_history.get_conversation(run.get("conversation_id") or "", include_deleted=ADMIN_MODE)
+    return conv is not None and _owned_by(conv, user_id, anon_id)
+
+
+@app.route("/api/runs")
+def runs_list():
+    user_id, anon_id = _identity()
+    rows = chat_history.list_runs(
+        limit=min(int(request.args.get("limit", 200)), 500),
+        user_id=user_id, anon_session_id=anon_id, include_deleted=ADMIN_MODE,
+    )
+    with _LIVE_RUNS_LOCK:
+        live_ids = set(_LIVE_RUNS)
+    for r in rows:  # 목록에는 후보 답변 원문까지는 필요 없음
+        if r["status"] == "running" and r["id"] not in live_ids:
+            r["status"] = "error"  # 서버 재시작 등으로 끝나지 못한 실행
+        r["candidates"] = [
+            {k: c.get(k) for k in ("model", "label", "status", "score", "decision", "ms")}
+            for c in (r.get("candidates") or [])
+        ]
+    return jsonify({"runs": rows})
+
+
+@app.route("/api/runs/<run_id>", methods=["DELETE"])
+def run_delete(run_id):
+    run = chat_history.get_run(run_id)
+    user_id, anon_id = _identity()
+    if run is None or not _run_owned(run, user_id, anon_id):
+        return jsonify({"error": "실행 기록을 찾을 수 없습니다."}), 404
+    with _LIVE_RUNS_LOCK:
+        if run_id in _LIVE_RUNS:
+            return jsonify({"error": "아직 답을 만드는 중인 기록은 지울 수 없습니다."}), 409
+    conv_deleted = chat_history.delete_run(run_id)
+    return jsonify({"ok": True, "conversation_deleted": conv_deleted})
+
+
+@app.route("/api/runs/<run_id>")
+def run_detail(run_id):
+    run = chat_history.get_run(run_id)
+    user_id, anon_id = _identity()
+    if run is None or not _run_owned(run, user_id, anon_id):
+        return jsonify({"error": "실행 기록을 찾을 수 없습니다."}), 404
+    with _LIVE_RUNS_LOCK:
+        live = _LIVE_RUNS.get(run_id)
+        tracer = live and live.get("tracer")
+        if tracer is not None:
+            # 아직 만드는 중 — DB에는 시작 시점 기록뿐이라 메모리의 실시간 이벤트로 채운다
+            run["events"] = list(tracer.events)
+            run["duration_ms"] = tracer.elapsed_ms()
+    run["live"] = tracer is not None
+    if run["status"] == "running" and not run["live"]:
+        run["status"] = "error"  # 서버 재시작 등으로 끝나지 못한 실행
+    return jsonify(run)
+
+
+def _file_meta(row):
+    return {k: row[k] for k in ("id", "filename", "size", "kind", "text_chars", "created_at")}
+
+
+@app.route("/api/files", methods=["GET"])
+def files_list():
+    user_id, anon_id = _identity()
+    return jsonify({"files": [_file_meta(r) for r in chat_history.list_files(user_id=user_id, anon_session_id=anon_id)]})
+
+
+@app.route("/api/files", methods=["POST"])
+def files_upload():
+    user_id, anon_id = _identity()
+    uploaded = request.files.getlist("file")
+    if not uploaded:
+        return jsonify({"error": "업로드할 파일이 없습니다."}), 400
+    saved, errors = [], []
+    for f in uploaded:
+        name = os.path.basename(f.filename or "").strip() or "upload.txt"
+        try:
+            data = f.read()
+            file_id, stored_name, kind, text_chars = file_store.save_upload(name, data)
+        except ValueError as e:
+            errors.append(f"{name}: {e}")
+            continue
+        chat_history.create_file(file_id, name, len(data), kind, text_chars, stored_name,
+                                 user_id=user_id, anon_session_id=anon_id)
+        saved.append(_file_meta(chat_history.get_file(file_id)))
+    status = 200 if saved else 400
+    return jsonify({"files": saved, "errors": errors, "error": "; ".join(errors) if not saved else None}), status
+
+
+def _owned_file_or_404(file_id):
+    row = chat_history.get_file(file_id)
+    user_id, anon_id = _identity()
+    if row is None or not _owned_by(row, user_id, anon_id):
+        return None
+    return row
+
+
+@app.route("/api/files/<file_id>", methods=["GET"])
+def file_detail(file_id):
+    row = _owned_file_or_404(file_id)
+    if row is None:
+        return jsonify({"error": "파일을 찾을 수 없습니다."}), 404
+    meta = _file_meta(row)
+    meta["preview"] = file_store.read_text(file_id)[:4000]
+    return jsonify(meta)
+
+
+@app.route("/api/files/<file_id>/download")
+def file_download(file_id):
+    row = _owned_file_or_404(file_id)
+    if row is None:
+        return jsonify({"error": "파일을 찾을 수 없습니다."}), 404
+    return send_from_directory(file_store.UPLOAD_DIR, row["stored_name"], as_attachment=True,
+                               download_name=row["filename"])
+
+
+@app.route("/api/files/<file_id>", methods=["DELETE"])
+def file_delete(file_id):
+    row = _owned_file_or_404(file_id)
+    if row is None:
+        return jsonify({"error": "파일을 찾을 수 없습니다."}), 404
+    file_store.remove(row)
+    chat_history.delete_file(file_id)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/conversations")
@@ -1714,6 +2111,7 @@ def conversation_detail(conversation_id):
         return jsonify({"error": "대화를 찾을 수 없습니다."}), 404
     if not ADMIN_MODE and not _owns_conversation(conv):
         return jsonify({"error": "대화를 찾을 수 없습니다."}), 404
+    conv["active_run_id"] = _live_run_for_conversation(conversation_id)
     return jsonify(conv)
 
 

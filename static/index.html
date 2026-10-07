@@ -1,1132 +1,454 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Qcells EMS 위키봇</title>
 <script>
   // CSS보다 먼저 실행해 테마 전환 시 잘못된 색으로 잠깐 렌더링되는 flash를 막는다.
   (function () {
-    var saved = localStorage.getItem('theme');
-    if (saved === 'light' || saved === 'dark') {
-      document.documentElement.setAttribute('data-theme', saved);
-    }
+    try {
+      var saved = localStorage.getItem('theme');
+      if (saved === 'light' || saved === 'dark') document.documentElement.setAttribute('data-theme', saved);
+    } catch (e) {}
   })();
 </script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-<style>
-  :root {
-    --bg: #FAF9F5;
-    --bg-raised: #FFFFFF;
-    --text: #3D3929;
-    --text-dim: #83807A;
-    --accent: #C15F3C;
-    --accent-text: #FFFFFF;
-    --border: #E5E3DA;
-    --user-bubble: #F0EEE6;
-    --input-bg: #FFFFFF;
-    --code-bg: rgba(61, 57, 41, 0.06);
-  }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      --bg: #262624;
-      --bg-raised: #2D2C2A;
-      --text: #F2F0E9;
-      --text-dim: #9C998F;
-      --accent: #D97757;
-      --accent-text: #262624;
-      --border: #3D3B37;
-      --user-bubble: #33322F;
-      --input-bg: #33322F;
-      --code-bg: rgba(255, 255, 255, 0.08);
-    }
-  }
-  :root[data-theme="dark"] {
-    --bg: #262624;
-    --bg-raised: #2D2C2A;
-    --text: #F2F0E9;
-    --text-dim: #9C998F;
-    --accent: #D97757;
-    --accent-text: #262624;
-    --border: #3D3B37;
-    --user-bubble: #33322F;
-    --input-bg: #33322F;
-    --code-bg: rgba(255, 255, 255, 0.08);
-  }
+<script src="/static/markdown.js"></script>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></symbol>
+  <symbol id="i-records" viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></symbol>
+  <symbol id="i-clip" viewBox="0 0 24 24"><path d="M21 11.5l-8.6 8.6a5 5 0 0 1-7.1-7.1l8.6-8.6a3.3 3.3 0 0 1 4.7 4.7l-8.6 8.6a1.7 1.7 0 0 1-2.4-2.4l7.9-7.9"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+  <symbol id="i-scale" viewBox="0 0 24 24"><path d="M12 3v18M7 21h10M5 7h14M5 7l-3 7a3.5 3.5 0 0 0 6 0zM19 7l-3 7a3.5 3.5 0 0 0 6 0z"/></symbol>
+  <symbol id="i-flow" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="12" r="2.5"/><path d="M8.5 6H12a3 3 0 0 1 3 3v.5M8.5 18H12a3 3 0 0 0 3-3v-.5"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></symbol>
+  <symbol id="i-flag" viewBox="0 0 24 24"><path d="M5 21V4M5 4h11l-2 4 2 4H5"/></symbol>
+</svg>
 
-  * { box-sizing: border-box; }
-  html, body {
-    margin: 0; height: 100%;
-    background: var(--bg); color: var(--text);
-    font-family: -apple-system, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
-  }
-
-  #app {
-    display: flex;
-    flex-direction: row;
-    height: 100vh;
-  }
-
-  #sidebar {
-    flex: none;
-    width: 260px;
-    display: flex;
-    flex-direction: column;
-    background: var(--bg-raised);
-    border-right: 1px solid var(--border);
-    transition: width 0.15s, padding 0.15s;
-    overflow: hidden;
-  }
-  #sidebar.collapsed { width: 0; }
-  #sidebarTop {
-    flex: none;
-    padding: 14px 12px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  #newChatBtn {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    background: none;
-    border: 1px solid var(--border);
-    color: var(--text);
-    border-radius: 10px;
-    padding: 9px 12px;
-    font-size: 13.5px;
-    font-family: inherit;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  #newChatBtn:hover { background: var(--user-bubble); }
-  #sidebarCollapseBtn {
-    flex: none;
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    cursor: pointer;
-    font-size: 14px;
-    padding: 6px;
-  }
-  #sidebarCollapseBtn:hover { color: var(--text); }
-  #convList {
-    flex: 1;
-    overflow-y: auto;
-    padding: 4px 8px 12px;
-  }
-  .conv-item {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 8px 10px;
-    border-radius: 8px;
-    cursor: pointer;
-    color: var(--text-dim);
-    font-size: 13px;
-  }
-  .conv-item:hover { background: var(--user-bubble); color: var(--text); }
-  .conv-item.active { background: var(--user-bubble); color: var(--text); }
-  .conv-item .title {
-    flex: 1;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .conv-item .del {
-    flex: none;
-    opacity: 0;
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    cursor: pointer;
-    font-size: 12px;
-    padding: 2px 4px;
-  }
-  .conv-item:hover .del { opacity: 1; }
-  .conv-item .del:hover { color: var(--accent); }
-  .conv-item.deleted { opacity: 0.5; }
-  .conv-item.deleted .title { text-decoration: line-through; }
-  .conv-item.deleted .del { opacity: 1; font-size: 11px; }
-  .conv-item.deleted .del:hover { color: var(--accent); }
-  #convEmpty {
-    color: var(--text-dim);
-    font-size: 12.5px;
-    padding: 10px 10px;
-  }
-  #sidebarOpenBtn {
-    display: none;
-    flex: none;
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    cursor: pointer;
-    font-size: 16px;
-    padding: 4px 8px;
-  }
-  #app.sidebar-collapsed #sidebarOpenBtn { display: inline-flex; }
-
-  #main {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    height: 100vh;
-    min-width: 0;
-  }
-
-  header {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 16px 24px;
-    font-weight: 600;
-    font-size: 15px;
-    color: var(--text-dim);
-    flex: none;
-  }
-  header .name { color: var(--text); font-weight: 600; }
-  .version-badge {
-    font-size: 11px;
-    font-weight: 500;
-    color: var(--text-dim);
-    background: var(--surface-2, rgba(127,127,127,.12));
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 1px 8px;
-    line-height: 1.6;
-  }
-  .landing-title .version-badge { margin-left: 8px; vertical-align: middle; }
-  #themeToggleBtn {
-    margin-left: auto;
-    width: 32px; height: 32px;
-    display: flex; align-items: center; justify-content: center;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--bg-raised);
-    color: var(--text-dim);
-    cursor: pointer;
-  }
-  #themeToggleBtn:hover { border-color: var(--accent); color: var(--text); }
-  #themeToggleBtn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-  #logoutBtn {
-    display: none;
-    margin-left: 8px;
-    height: 32px;
-    padding: 0 12px;
-    align-items: center;
-    justify-content: center;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--bg-raised);
-    color: var(--text-dim);
-    font-size: 13px;
-    cursor: pointer;
-  }
-  #logoutBtn:hover { border-color: var(--accent); color: var(--text); }
-  #loginBtn {
-    display: none;
-    margin-left: 8px;
-    height: 32px;
-    padding: 0 12px;
-    align-items: center;
-    justify-content: center;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: transparent;
-    color: var(--text-dim);
-    font-size: 13px;
-    cursor: pointer;
-  }
-  #loginBtn:hover { border-color: var(--accent); color: var(--text); }
-  #authUsername {
-    display: none;
-    margin-left: 8px;
-    font-size: 13px;
-    color: var(--text-dim);
-  }
-
-  .auth-overlay {
-    position: fixed; inset: 0; background: rgba(0,0,0,.45);
-    display: flex; align-items: center; justify-content: center; z-index: 50;
-  }
-  .auth-overlay.hidden { display: none; }
-  .auth-modal {
-    background: var(--bg-raised); border: 1px solid var(--border); border-radius: 12px;
-    padding: 20px 22px; width: 320px; box-shadow: 0 8px 30px rgba(0,0,0,.2);
-  }
-  .auth-modal h3 { margin: 0 0 14px; font-size: 16px; }
-  .auth-tabs { display: flex; gap: 4px; margin-bottom: 14px; }
-  .auth-tabs button {
-    flex: 1; padding: 6px 0; border: 1px solid var(--border); background: var(--bg);
-    color: var(--text-dim); border-radius: 8px; cursor: pointer; font-size: 13px;
-  }
-  .auth-tabs button.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
-  .auth-field { margin-bottom: 10px; }
-  .auth-field label { display: block; font-size: 12.5px; color: var(--text-dim); margin-bottom: 4px; }
-  .auth-field input {
-    width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 8px;
-    border: 1px solid var(--border); background: var(--input-bg); color: var(--text); font-size: 14px;
-  }
-  .auth-status { font-size: 12.5px; margin-top: 6px; min-height: 16px; color: var(--accent); }
-  .auth-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
-  .auth-actions button {
-    padding: 7px 14px; border-radius: 8px; border: none; cursor: pointer; font-size: 13px;
-  }
-  .auth-actions .auth-cancel { background: transparent; color: var(--text-dim); }
-  .auth-actions .auth-submit { background: var(--accent); color: var(--accent-text); font-weight: 600; }
-
-  /* 대화 시작 전: 화면 중앙에 타이틀 + 입력창 */
-  #app.landing #messages { display: none; }
-  #app.landing #stage { justify-content: center; }
-  #app.landing #inputbar { border-top: none; }
-  #app.landing .landing-title {
-    display: block;
-    text-align: center;
-    font-size: 28px;
-    font-weight: 600;
-    margin-bottom: 24px;
-  }
-  .landing-title { display: none; }
-
-  #stage {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
-
-  #messages {
-    flex: 1;
-    overflow-y: auto;
-    padding: 8px 24px 24px;
-  }
-  .msg {
-    max-width: 820px;
-    margin: 0 auto;
-    padding: 14px 0;
-    display: flex;
-  }
-  .msg.user { justify-content: flex-end; }
-  .msg.assistant { justify-content: flex-start; }
-
-  .bubble {
-    white-space: pre-wrap;
-    line-height: 1.65;
-    font-size: 15.5px;
-  }
-  .msg.user .bubble {
-    background: var(--user-bubble);
-    border-radius: 18px;
-    padding: 10px 16px;
-    max-width: 75%;
-  }
-  .msg.assistant .bubble {
-    max-width: 100%;
-    padding: 2px 0;
-  }
-  .bubble code {
-    background: var(--code-bg);
-    padding: 1px 5px; border-radius: 4px;
-    font-family: "Consolas", "D2Coding", monospace;
-    font-size: 0.92em;
-  }
-  .bubble a {
-    color: var(--accent);
-    text-decoration: underline;
-    text-underline-offset: 2px;
-  }
-  .bubble a:hover { opacity: 0.8; }
-  .bubble h1, .bubble h2, .bubble h3, .bubble h4, .bubble h5, .bubble h6 {
-    font-weight: 700;
-    line-height: 1.35;
-    margin: 20px 0 8px;
-    color: var(--text);
-  }
-  .bubble h1:first-child, .bubble h2:first-child, .bubble h3:first-child,
-  .bubble h4:first-child, .bubble h5:first-child, .bubble h6:first-child {
-    margin-top: 2px;
-  }
-  .bubble h1 { font-size: 1.5em; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
-  .bubble h2 { font-size: 1.28em; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
-  .bubble h3 { font-size: 1.12em; }
-  .bubble h4 { font-size: 1em; }
-  .bubble h5, .bubble h6 { font-size: 0.92em; color: var(--text-dim); }
-  .bubble pre {
-    background: var(--code-bg);
-    border-radius: 10px;
-    padding: 12px 14px;
-    overflow-x: auto;
-  }
-  .bubble pre code { background: none; padding: 0; }
-  .table-wrap {
-    overflow-x: auto;
-    margin: 10px 0;
-    border: 1px solid var(--border);
-    border-radius: 10px;
-  }
-  .md-table {
-    border-collapse: collapse;
-    width: 100%;
-    font-size: 14px;
-    white-space: nowrap;
-  }
-  .md-table th, .md-table td {
-    padding: 8px 14px;
-    border-bottom: 1px solid var(--border);
-    text-align: left;
-  }
-  .md-table thead th {
-    background: var(--code-bg);
-    font-weight: 600;
-  }
-  .md-table tbody tr:last-child td { border-bottom: none; }
-  .bubble img {
-    max-width: 100%;
-    border-radius: 10px;
-    border: 1px solid var(--border);
-    display: block;
-    margin: 10px 0;
-  }
-  .bubble pre.mermaid {
-    background: var(--bg-raised);
-    border: 1px solid var(--border);
-    display: flex;
-    justify-content: center;
-  }
-  .mermaid-error-note {
-    color: var(--text-dim);
-    font-size: 13px;
-    margin: 8px 0 4px;
-  }
-  .sources-block {
-    margin-top: 0;
-  }
-  .sources-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    background: var(--code-bg);
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    padding: 4px 12px;
-    font-size: 12.5px;
-    color: var(--text-dim);
-    cursor: pointer;
-    user-select: none;
-  }
-  .sources-toggle:hover { color: var(--text); }
-  .sources-toggle .chevron { transition: transform 0.15s; font-size: 10px; }
-  .sources-block.open .chevron { transform: rotate(180deg); }
-  .sources-list {
-    display: none;
-    flex-direction: column;
-    gap: 4px;
-    margin-top: 8px;
-    padding-left: 2px;
-  }
-  .sources-block.open .sources-list { display: flex; }
-  .source-item {
-    font-size: 13px;
-    display: flex;
-    gap: 6px;
-    align-items: baseline;
-  }
-  .source-item .icon { flex: none; }
-  .source-item a {
-    color: var(--text);
-    text-decoration: none;
-  }
-  .source-item a:hover { color: var(--accent); text-decoration: underline; }
-  .source-item span.plain { color: var(--text); }
-  .msg-actions {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    margin-top: 12px;
-  }
-  .feedback-btn {
-    flex: none;
-    background: none;
-    border: 1px solid var(--border);
-    color: var(--text-dim);
-    border-radius: 14px;
-    padding: 4px 12px;
-    font-size: 12.5px;
-    cursor: pointer;
-    font-family: inherit;
-    white-space: nowrap;
-  }
-  .feedback-btn:hover { color: var(--text); border-color: var(--text-dim); }
-  .copy-btn {
-    flex: none;
-    background: none;
-    border: 1px solid var(--border);
-    color: var(--text-dim);
-    border-radius: 14px;
-    width: 28px;
-    height: 28px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 13px;
-    line-height: 1;
-    cursor: pointer;
-    font-family: inherit;
-    padding: 0;
-  }
-  .copy-btn:hover { color: var(--text); border-color: var(--text-dim); }
-
-  .feedback-overlay {
-    position: fixed; inset: 0;
-    background: rgba(0,0,0,0.4);
-    display: flex; align-items: center; justify-content: center;
-    z-index: 100;
-  }
-  .feedback-overlay.hidden { display: none; }
-  .feedback-modal {
-    background: var(--bg-raised);
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    padding: 20px;
-    width: 90%;
-    max-width: 480px;
-    max-height: 80vh;
-    overflow-y: auto;
-  }
-  .feedback-modal h3 { margin: 0 0 14px; font-size: 16px; }
-  .feedback-field { margin-bottom: 10px; }
-  .feedback-field label {
-    display: block;
-    font-size: 13px;
-    margin-bottom: 6px;
-    color: var(--text);
-  }
-  .feedback-hint { color: var(--text-dim); font-weight: normal; font-size: 12px; }
-  #feedbackMessage {
-    width: 100%;
-    background: var(--input-bg);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 10px 12px;
-    color: var(--text);
-    font-size: 14px;
-    font-family: inherit;
-    box-sizing: border-box;
-  }
-  #feedbackMessage { resize: vertical; }
-  .feedback-status { font-size: 12.5px; margin-top: 8px; min-height: 16px; }
-  .feedback-status.error { color: var(--accent); }
-  .feedback-status.ok { color: var(--text-dim); }
-  .feedback-actions {
-    display: flex; justify-content: flex-end; gap: 8px;
-    margin-top: 14px;
-  }
-  .feedback-actions button {
-    border-radius: 10px;
-    padding: 8px 14px;
-    font-size: 13.5px;
-    cursor: pointer;
-    font-family: inherit;
-    border: 1px solid var(--border);
-    background: none;
-    color: var(--text);
-  }
-  .feedback-actions button:disabled { opacity: 0.5; cursor: default; }
-  #feedbackSendBtn {
-    background: var(--accent);
-    color: var(--accent-text);
-    border-color: var(--accent);
-  }
-
-  .typing { color: var(--text-dim); display: inline-flex; align-items: center; gap: 6px; }
-  .typing .dots { display: inline-flex; gap: 3px; }
-  .typing .dots span {
-    display: inline-block;
-    width: 6px; height: 6px;
-    border-radius: 50%;
-    background: var(--accent);
-    animation: typing-bounce 4.8s ease-in-out infinite;
-  }
-  .typing .dots span:nth-child(2) { animation-delay: 0.6s; }
-  .typing .dots span:nth-child(3) { animation-delay: 1.2s; }
-  @keyframes typing-bounce {
-    0%, 60%, 100% { opacity: 0.3; }
-    30% { opacity: 1; }
-  }
-
-  #inputbar {
-    flex: none;
-    border-top: 1px solid var(--border);
-    padding: 18px 24px 22px;
-  }
-  #inputbar form {
-    max-width: 820px; margin: 0 auto;
-    display: flex; align-items: flex-end; gap: 10px;
-    background: var(--input-bg);
-    border: 1px solid var(--border);
-    border-radius: 22px;
-    padding: 12px 12px 12px 20px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
-  }
-  #inputbar textarea {
-    flex: 1;
-    resize: none;
-    background: transparent;
-    border: none;
-    outline: none;
-    color: var(--text);
-    font-size: 15.5px;
-    font-family: inherit;
-    max-height: 200px;
-    line-height: 1.5;
-    padding: 4px 0;
-  }
-  #inputbar textarea::placeholder { color: var(--text-dim); }
-  #inputbar button {
-    flex: none;
-    background: var(--accent);
-    border: none;
-    color: var(--accent-text);
-    width: 34px; height: 34px;
-    border-radius: 50%;
-    cursor: pointer;
-    font-size: 16px;
-    display: flex; align-items: center; justify-content: center;
-  }
-  #inputbar button:disabled { opacity: 0.4; cursor: default; }
-  #hint {
-    text-align: center;
-    color: var(--text-dim);
-    font-size: 12px;
-    padding: 10px 0 0;
-    max-width: 820px;
-    margin: 0 auto;
-  }
-  #modelbar {
-    max-width: 820px;
-    margin: 8px auto 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    font-size: 12.5px;
-    color: var(--text-dim);
-  }
-  #modelbar select {
-    background: var(--input-bg);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 4px 8px;
-    font-size: 12.5px;
-    font-family: inherit;
-  }
-</style>
-
-<div id="app" class="landing">
-  <div id="sidebar">
-    <div id="sidebarTop">
-      <button id="newChatBtn" type="button"><span>＋</span><span>새 대화</span></button>
-      <button id="sidebarCollapseBtn" type="button" title="사이드바 접기">◂</button>
+<div class="product-shell" id="shell">
+  <div class="nav-backdrop" id="navBackdrop"></div>
+  <aside class="product-sidebar" id="sidebar">
+    <div class="brand-row">
+      <a class="brand" href="#/chat"><span>Q</span><strong>cells EMS Wiki</strong></a>
+      <button class="icon-btn mobile-only" id="navCloseBtn" type="button" aria-label="메뉴 닫기"><svg class="i"><use href="#i-x"/></svg></button>
     </div>
-    <div id="convList"></div>
-  </div>
-  <div id="main">
-    <header>
-      <button id="sidebarOpenBtn" type="button" title="사이드바 펼치기">▸</button>
-      <span class="name">Qcells EMS 위키봇</span>
-      <span class="version-badge">v1.2.2</span>
-      <button id="themeToggleBtn" type="button" title="테마 전환"></button>
-      <button id="loginBtn" type="button">로그인</button>
-      <span id="authUsername"></span>
-      <button id="logoutBtn" type="button">로그아웃</button>
-    </header>
-    <div id="stage">
-      <div class="landing-title">Qcells EMS 위키봇<span class="version-badge">v1.2.2</span></div>
-      <div id="messages"></div>
-      <div id="inputbar">
-        <form id="form">
-          <textarea id="input" rows="1" placeholder="위키 내용에 대해 물어보세요..."></textarea>
-          <button id="send" type="submit">↑</button>
-        </form>
-        <div id="modelbar">
-          <label for="modelSelect">모델</label>
-          <select id="modelSelect"></select>
-        </div>
-        <div id="hint">Confluence 라이브 검색 기반으로 답합니다</div>
+    <button class="new-task-button" id="newChatBtn" type="button"><svg class="i"><use href="#i-plus"/></svg>새 작업</button>
+    <nav class="product-nav">
+      <a href="#/chat" data-view="chat"><svg class="i"><use href="#i-chat"/></svg>대화</a>
+      <a href="#/records" data-view="records"><svg class="i"><use href="#i-records"/></svg>실행 기록<span class="count" id="navRunCount"></span></a>
+      <a href="#/files" data-view="files"><svg class="i"><use href="#i-file"/></svg>파일<span class="count" id="navFileCount"></span></a>
+    </nav>
+    <div style="flex:1"></div>
+    <div class="sidebar-foot">
+      <span class="who" id="authWho">로그인하지 않음</span>
+      <button class="link-btn" id="loginBtn" type="button" hidden>로그인</button>
+      <button class="link-btn" id="logoutBtn" type="button" hidden>로그아웃</button>
+    </div>
+  </aside>
+
+  <main class="product-main">
+    <header class="product-topbar">
+      <button class="icon-btn mobile-only" id="navOpenBtn" type="button" aria-label="메뉴 열기"><svg class="i"><use href="#i-menu"/></svg></button>
+      <div class="topbar-project">
+        <strong id="topTitle">새 작업</strong>
+        <span class="product-status status-idle" id="topStatus"><i></i><span>대기</span></span>
       </div>
+      <span class="version-badge top">v…</span>
+      <div class="topbar-actions">
+        <button class="text-btn" id="wbOpenBtn" type="button" title="작업대 열기/접기"><svg class="i"><use href="#i-panel"/></svg>작업대</button>
+        <button class="icon-btn" id="themeToggleBtn" type="button" aria-label="테마 전환"></button>
+      </div>
+    </header>
+
+    <div class="product-content">
+      <!-- 대화 + 작업대 -->
+      <section class="view build-layout" id="view-chat">
+        <div class="build-thread is-landing" id="thread">
+          <div class="landing">
+            <div class="page-overline">Qcells EMS · Confluence · Jira</div>
+            <h1>질문만 주세요.</h1>
+            <p>위키봇이 사내 Confluence와 Jira를 검색하고, 필요하면 여러 모델의 답을 나란히 채점해 더 나은 답을 채택합니다.
+              어떤 문서를 찾았고 어떤 모델이 왜 채택됐는지 — 전 과정이 오른쪽 작업대와 실행 기록에 남습니다.</p>
+            <div class="flow-chips"><span>질문 분석</span>→<span>Rovo 검색</span>→<span>인물·Jira 보강</span>→<span>모델별 답변</span>→<span>채점·채택</span>→<span>기록</span></div>
+            <div class="prompt-examples" id="promptExamples">
+              <button type="button"><small>로직 설명</small>Advanced TOU TimeTable 로직을 설명해줘</button>
+              <button type="button"><small>사람 · 업무</small>EnergySW 파트에서 문서를 가장 많이 작성한 사람은?</button>
+              <button type="button"><small>첨부 파일 분석</small>첨부한 로그에서 에러 원인을 찾아줘</button>
+            </div>
+          </div>
+          <div class="conversation" id="messages"></div>
+          <form class="chat-composer" id="form">
+            <div class="composer-attachments" id="attachments"></div>
+            <textarea id="input" rows="1" placeholder="위키 내용에 대해 물어보세요. 파일을 끌어다 놓으면 첨부됩니다."></textarea>
+            <div class="composer-footer">
+              <button class="composer-tool" id="attachBtn" type="button" title="파일 첨부"><svg class="i"><use href="#i-clip"/></svg><span class="lbl">첨부</span></button>
+              <input type="file" id="fileInput" multiple hidden>
+              <select class="model-select" id="modelSelect" title="답변 모델"></select>
+              <div class="compare-wrap">
+                <button class="composer-tool" id="compareBtn" type="button" title="여러 모델로 답하고 더 나은 답 채택"><svg class="i"><use href="#i-scale"/></svg><span class="lbl" id="compareLbl">모델 비교</span></button>
+                <div class="compare-pop" id="comparePop" hidden>
+                  <h4>모델 비교 · 채택</h4>
+                  <p>선택한 모델들이 같은 자료로 각자 답한 뒤, 어느 모델인지 가린 채 채점해 점수가 높은 답을 내보냅니다. 기본 모델(위 선택)을 바꾸려면 <b id="marginNote">3</b>점 이상 앞서야 합니다.</p>
+                  <div id="compareList"></div>
+                  <div class="pop-foot"><span>비교 모드</span><button type="button" class="switch" id="compareSwitch" aria-label="비교 모드"></button></div>
+                </div>
+              </div>
+              <button class="composer-send" id="send" type="submit" aria-label="보내기"><svg class="i"><use href="#i-send"/></svg></button>
+            </div>
+          </form>
+          <div class="composer-privacy">개인정보·비밀번호는 입력하지 마세요 · Confluence 라이브 검색 기반 답변</div>
+        </div>
+
+        <div class="work-status-backdrop" id="wbBackdrop"></div>
+        <aside class="workbench" id="workbench" aria-label="작업대"></aside>
+      </section>
+
+      <!-- 실행 기록 — 화면 이름만 실행 기록, 구조는 expharness "전체 작업" 벤치마킹: "새 작업" 1번 = 작업 1개, 누르면 그 작업의 대화 전문 -->
+      <section class="view page" id="view-records" hidden>
+        <!-- 작업을 누르면: 그 작업에서 주고받은 대화를 읽기 전용으로(내 질문 오른쪽, 위키봇 답 왼쪽) -->
+        <div class="page-inner" id="taskDetail" hidden></div>
+        <div class="page-inner" id="taskList">
+          <header class="projects-page-heading"><div>
+            <div class="page-overline">작업</div>
+            <h1>실행 기록</h1>
+            <p>“새 작업”을 누를 때마다 작업 하나가 만들어지고, 그 안에서 이어 물은 질문·답변과 처리 과정이 함께 묶여 저장됩니다.</p>
+          </div><button type="button" id="recordsNewBtn"><svg class="i"><use href="#i-plus"/></svg> 새 작업</button></header>
+          <div class="kpis" id="recordKpis"></div>
+          <div class="projects-toolbar">
+            <label><svg class="i"><use href="#i-search"/></svg><span class="sr-only">작업 검색</span><input type="search" id="taskSearch" placeholder="작업 제목이나 질문 검색"></label>
+            <div role="group" aria-label="작업 필터" id="recordTabs"></div>
+            <button type="button" class="projects-refresh" id="taskRefresh" aria-label="새로고침"><svg class="i"><use href="#i-refresh"/></svg></button>
+          </div>
+          <section class="dir-table" aria-label="저장된 작업">
+            <div class="dir-head"><span>작업</span><span>상태 · 최근 변경</span><span></span></div>
+            <div id="taskRows"></div>
+          </section>
+        </div>
+      </section>
+
+      <!-- 파일 -->
+      <section class="view page" id="view-files" hidden>
+        <div class="page-inner">
+          <div class="page-heading">
+            <div class="page-overline">자료</div>
+            <h1>파일</h1>
+            <p>로그·설정·표·문서를 올려두고 대화에 첨부하면, 위키 검색 결과와 함께 답변 근거로 쓰입니다.</p>
+          </div>
+          <div class="dropzone" id="dropzone">
+            <strong>파일을 끌어다 놓거나 눌러서 선택</strong>
+            <small>텍스트·로그·CSV·JSON·코드 · xlsx · docx · pptx · pdf — 파일당 최대 20MB</small>
+          </div>
+          <div class="upload-status" id="uploadStatus"></div>
+          <div class="table-scroll"><table class="projects-table" id="fileTable"></table></div>
+        </div>
+      </section>
     </div>
-  </div>
+  </main>
 </div>
 
-<div id="authOverlay" class="auth-overlay hidden">
-  <div class="auth-modal">
-    <div class="auth-tabs">
+<div id="authOverlay" class="overlay hidden">
+  <div class="modal">
+    <div class="seg">
       <button type="button" id="authTabLogin" class="active">로그인</button>
       <button type="button" id="authTabRegister">회원가입</button>
     </div>
-    <h3 id="authTitle">로그인</h3>
-    <div class="auth-field">
-      <label for="authUsernameInput">아이디</label>
-      <input id="authUsernameInput" type="text" autocomplete="username">
-    </div>
-    <div class="auth-field">
-      <label for="authPasswordInput">비밀번호</label>
-      <input id="authPasswordInput" type="password" autocomplete="current-password">
-    </div>
-    <div id="authStatus" class="auth-status"></div>
-    <div class="auth-actions">
-      <button type="button" class="auth-cancel" id="authCancelBtn">취소</button>
-      <button type="button" class="auth-submit" id="authSubmitBtn">로그인</button>
+    <div class="field"><label for="authUsernameInput">아이디</label><input id="authUsernameInput" type="text" autocomplete="username"></div>
+    <div class="field"><label for="authPasswordInput">비밀번호</label><input id="authPasswordInput" type="password" autocomplete="current-password"></div>
+    <div id="authStatus" class="form-status"></div>
+    <div class="modal-actions">
+      <button type="button" class="btn" id="authCancelBtn">취소</button>
+      <button type="button" class="btn solid" id="authSubmitBtn">로그인</button>
     </div>
   </div>
 </div>
 
-<div id="feedbackOverlay" class="feedback-overlay hidden">
-  <div class="feedback-modal">
+<div id="feedbackOverlay" class="overlay hidden">
+  <div class="modal">
     <h3>수정요청 보내기</h3>
-    <div class="feedback-field">
-      <label for="feedbackMessage">내용 <span class="feedback-hint">예: Jira 티켓 연동이 안 됩니다. / 이 부분 답변이 사실과 다릅니다...</span></label>
+    <div class="field">
+      <label for="feedbackMessage">내용 <span class="hint">예: Jira 티켓 연동이 안 됩니다. / 이 부분 답변이 사실과 다릅니다...</span></label>
       <textarea id="feedbackMessage" rows="4"></textarea>
     </div>
-    <div id="feedbackStatus" class="feedback-status"></div>
-    <div class="feedback-actions">
-      <button type="button" id="feedbackCancelBtn">취소</button>
-      <button type="button" id="feedbackSendBtn">이메일로 보내기</button>
+    <div id="feedbackStatus" class="form-status"></div>
+    <div class="modal-actions">
+      <button type="button" class="btn" id="feedbackCancelBtn">취소</button>
+      <button type="button" class="btn solid" id="feedbackSendBtn">이메일로 보내기</button>
     </div>
+  </div>
+</div>
+
+<div id="viewerOverlay" class="overlay hidden">
+  <div class="modal wide">
+    <div class="modal-head"><h3 id="viewerTitle"></h3><button class="icon-btn" type="button" id="viewerClose" aria-label="닫기"><svg class="i"><use href="#i-x"/></svg></button></div>
+    <div id="viewerBody"></div>
   </div>
 </div>
 
 <script>
-  const appEl = document.getElementById('app');
-  const messagesEl = document.getElementById('messages');
-  const form = document.getElementById('form');
-  const input = document.getElementById('input');
-  const sendBtn = document.getElementById('send');
-  const modelSelect = document.getElementById('modelSelect');
-  const convListEl = document.getElementById('convList');
-  const newChatBtn = document.getElementById('newChatBtn');
-  const sidebarEl = document.getElementById('sidebar');
-  const sidebarCollapseBtn = document.getElementById('sidebarCollapseBtn');
-  const sidebarOpenBtn = document.getElementById('sidebarOpenBtn');
-  const themeToggleBtn = document.getElementById('themeToggleBtn');
-  const loginBtn = document.getElementById('loginBtn');
-  const logoutBtn = document.getElementById('logoutBtn');
-  const authUsernameEl = document.getElementById('authUsername');
-  const authOverlay = document.getElementById('authOverlay');
-  const authTabLogin = document.getElementById('authTabLogin');
-  const authTabRegister = document.getElementById('authTabRegister');
-  const authTitle = document.getElementById('authTitle');
-  const authUsernameInput = document.getElementById('authUsernameInput');
-  const authPasswordInput = document.getElementById('authPasswordInput');
-  const authStatusEl = document.getElementById('authStatus');
-  const authCancelBtn = document.getElementById('authCancelBtn');
-  const authSubmitBtn = document.getElementById('authSubmitBtn');
+  // ───────────────────────── 공통 ─────────────────────────
+  const $ = (id) => document.getElementById(id);
+  const shell = $('shell');
+  const threadEl = $('thread');
+  const messagesEl = $('messages');
+  const form = $('form');
+  const input = $('input');
+  const sendBtn = $('send');
+  const modelSelect = $('modelSelect');
+  const workbenchEl = $('workbench');
 
-  let authMode = 'login'; // 'login' | 'register'
-
-  function setAuthMode(mode) {
-    authMode = mode;
-    const isLogin = mode === 'login';
-    authTabLogin.classList.toggle('active', isLogin);
-    authTabRegister.classList.toggle('active', !isLogin);
-    authTitle.textContent = isLogin ? '로그인' : '회원가입';
-    authSubmitBtn.textContent = isLogin ? '로그인' : '가입하기';
-    authStatusEl.textContent = '';
+  function icon(name) { return `<svg class="i"><use href="#i-${name}"/></svg>`; }
+  function store(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) {} }
+  function load(key, fallback) { try { const v = localStorage.getItem(key); return v == null ? fallback : JSON.parse(v); } catch (e) { return fallback; } }
+  function fmtMs(ms) {
+    if (ms == null) return '';
+    if (ms < 1000) return ms + 'ms';
+    if (ms < 60000) return (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + 's';
+    return Math.floor(ms / 60000) + 'm ' + Math.round((ms % 60000) / 1000) + 's';
+  }
+  function fmtBytes(n) {
+    if (n < 1024) return n + 'B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + 'KB';
+    return (n / 1024 / 1024).toFixed(1) + 'MB';
+  }
+  function fmtTime(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    const diff = (Date.now() - d.getTime()) / 1000;
+    if (diff < 60) return '방금';
+    if (diff < 3600) return Math.floor(diff / 60) + '분 전';
+    if (diff < 86400) return Math.floor(diff / 3600) + '시간 전';
+    return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  }
+  function setTopStatus(kind, text) {
+    const el = $('topStatus');
+    el.className = 'product-status status-' + kind;
+    el.querySelector('span').textContent = text;
   }
 
-  function openAuthModal(mode) {
-    setAuthMode(mode);
-    authUsernameInput.value = '';
-    authPasswordInput.value = '';
-    authOverlay.classList.remove('hidden');
-    authUsernameInput.focus();
-  }
-
-  function closeAuthModal() {
-    authOverlay.classList.add('hidden');
-  }
-
-  loginBtn.addEventListener('click', () => openAuthModal('login'));
-  authTabLogin.addEventListener('click', () => setAuthMode('login'));
-  authTabRegister.addEventListener('click', () => setAuthMode('register'));
-  authCancelBtn.addEventListener('click', closeAuthModal);
-  authOverlay.addEventListener('click', (e) => { if (e.target === authOverlay) closeAuthModal(); });
-
-  async function submitAuth() {
-    const username = authUsernameInput.value.trim();
-    const password = authPasswordInput.value;
-    if (!username || !password) {
-      authStatusEl.textContent = '아이디와 비밀번호를 입력해주세요.';
-      return;
-    }
-    authSubmitBtn.disabled = true;
-    try {
-      const res = await fetch(authMode === 'login' ? '/api/login' : '/api/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        authStatusEl.textContent = data.error || '요청에 실패했습니다.';
-        authSubmitBtn.disabled = false;
-        return;
-      }
-      location.reload(); // URL은 그대로(/) — 로그인 쿠키가 생겼으니 새로고침만 해도 서버가 알아서 개인 데이터를 내려준다
-    } catch (e) {
-      authStatusEl.textContent = '네트워크 오류가 발생했습니다.';
-      authSubmitBtn.disabled = false;
-    }
-  }
-  authSubmitBtn.addEventListener('click', submitAuth);
-  authPasswordInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitAuth(); });
-
-  logoutBtn.addEventListener('click', async () => {
-    await fetch('/api/logout', { method: 'POST' });
-    location.reload(); // 쿠키(session)가 지워졌으니 URL은 그대로 두고 새로고침만 하면 공용 화면으로 돌아간다
-  });
-  fetch('/api/whoami').then(r => r.json()).then(data => {
-    if (data.logged_in) {
-      logoutBtn.style.display = 'flex';
-      authUsernameEl.style.display = 'inline';
-      authUsernameEl.textContent = data.username + '님';
-    } else {
-      loginBtn.style.display = 'flex';
-    }
-    // 버전 배지는 원래 이 HTML에 "v1.2.2"로 하드코딩돼 있어서 배포 때마다 직접 고쳐야
-    // 했다 — 이제 wikibot.env의 WIKIBOT_VERSION을 /api/whoami로 받아 그대로 표시한다
-    // (2026-09-18, 사용자 요청). 값이 없으면 서버가 이미 "dev"를 내려주므로 그대로 둠.
-    if (data.version) {
-      document.querySelectorAll('.version-badge').forEach(el => {
-        el.textContent = 'v' + data.version;
-      });
-    }
-  }).catch(() => {});
-
-  let history = [];
-  let started = false;
-  let currentConversationId = null;
-
+  // ───────────────────────── 테마 ─────────────────────────
   // data-theme이 명시돼 있으면(수동 토글) 그걸 우선하고, 없으면 시스템 설정을 따른다.
   function getEffectiveTheme() {
     const manual = document.documentElement.getAttribute('data-theme');
     if (manual === 'light' || manual === 'dark') return manual;
     return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   }
-  const ICON_SUN = '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>';
-  const ICON_MOON = '<svg viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/></svg>';
-  function applyThemeIcon() {
-    themeToggleBtn.innerHTML = getEffectiveTheme() === 'dark' ? ICON_MOON : ICON_SUN;
-  }
+  function applyThemeIcon() { $('themeToggleBtn').innerHTML = icon(getEffectiveTheme() === 'dark' ? 'moon' : 'sun'); }
   applyThemeIcon();
-  themeToggleBtn.addEventListener('click', () => {
+  $('themeToggleBtn').addEventListener('click', () => {
     const next = getEffectiveTheme() === 'dark' ? 'light' : 'dark';
     document.documentElement.setAttribute('data-theme', next);
-    localStorage.setItem('theme', next);
+    try { localStorage.setItem('theme', next); } catch (e) {}
     applyThemeIcon();
-    if (window.mermaid) {
-      mermaid.initialize({ startOnLoad: false, theme: next === 'dark' ? 'dark' : 'default' });
-    }
+    if (window.mermaid) mermaid.initialize({ startOnLoad: false, theme: next === 'dark' ? 'dark' : 'default' });
   });
+  if (window.mermaid) mermaid.initialize({ startOnLoad: false, theme: getEffectiveTheme() === 'dark' ? 'dark' : 'default' });
 
-  if (window.mermaid) {
-    mermaid.initialize({ startOnLoad: false, theme: getEffectiveTheme() === 'dark' ? 'dark' : 'default' });
+  // ───────────────────────── 화면 전환(해시 라우팅) ─────────────────────────
+  function currentView() {
+    const m = location.hash.match(/^#\/(chat|records|files)/);
+    return m ? m[1] : 'chat';
   }
+  function showView() {
+    const view = currentView();
+    ['chat', 'records', 'files'].forEach(v => { $('view-' + v).hidden = v !== view; });
+    document.querySelectorAll('.product-nav a').forEach(a => a.classList.toggle('active', a.dataset.view === view));
+    $('wbOpenBtn').classList.toggle('is-hidden', view !== 'chat');
+    if (view === 'records') {
+      const m = location.hash.match(/^#\/records\/([0-9a-f]+)(?:\?run=([0-9a-f]+))?/);
+      $('taskList').hidden = !!m;
+      $('taskDetail').hidden = !m;
+      if (m) renderTaskDetail(m[1], m[2]);
+      else { $('topTitle').textContent = '실행 기록'; loadRecords(); }
+    }
+    else if (view === 'files') { $('topTitle').textContent = '파일'; loadFiles(); }
+    else $('topTitle').textContent = currentTitle || '새 작업';
+    shell.classList.remove('shell-nav-open');
+  }
+  window.addEventListener('hashchange', showView);
+  $('navOpenBtn').addEventListener('click', () => shell.classList.add('shell-nav-open'));
+  $('navCloseBtn').addEventListener('click', () => shell.classList.remove('shell-nav-open'));
+  $('navBackdrop').addEventListener('click', () => shell.classList.remove('shell-nav-open'));
+  // 데스크톱: 작업대를 접으면 답변 창이 오른쪽까지 넓어진다(선택 유지). 모바일: 덮개로 연다.
+  const buildLayoutEl = $('view-chat');
+  buildLayoutEl.classList.toggle('wb-collapsed', !!load('wb.collapsed', false));
+  $('wbOpenBtn').addEventListener('click', () => {
+    if (window.matchMedia('(max-width: 900px)').matches) { shell.classList.add('wb-open'); return; }
+    const collapsed = !buildLayoutEl.classList.contains('wb-collapsed');
+    buildLayoutEl.classList.toggle('wb-collapsed', collapsed);
+    store('wb.collapsed', collapsed);
+  });
+  $('wbBackdrop').addEventListener('click', () => shell.classList.remove('wb-open'));
 
-  let availableModels = [];
+  // ───────────────────────── 로그인 ─────────────────────────
+  let authMode = 'login';
+  const authOverlay = $('authOverlay');
+  function setAuthMode(mode) {
+    authMode = mode;
+    $('authTabLogin').classList.toggle('active', mode === 'login');
+    $('authTabRegister').classList.toggle('active', mode !== 'login');
+    $('authSubmitBtn').textContent = mode === 'login' ? '로그인' : '가입하기';
+    $('authStatus').textContent = '';
+  }
+  function openAuthModal(mode) {
+    setAuthMode(mode);
+    $('authUsernameInput').value = '';
+    $('authPasswordInput').value = '';
+    authOverlay.classList.remove('hidden');
+    $('authUsernameInput').focus();
+  }
+  $('loginBtn').addEventListener('click', () => openAuthModal('login'));
+  $('authTabLogin').addEventListener('click', () => setAuthMode('login'));
+  $('authTabRegister').addEventListener('click', () => setAuthMode('register'));
+  $('authCancelBtn').addEventListener('click', () => authOverlay.classList.add('hidden'));
+  authOverlay.addEventListener('click', (e) => { if (e.target === authOverlay) authOverlay.classList.add('hidden'); });
+  async function submitAuth() {
+    const username = $('authUsernameInput').value.trim();
+    const password = $('authPasswordInput').value;
+    if (!username || !password) { $('authStatus').textContent = '아이디와 비밀번호를 입력해주세요.'; return; }
+    $('authSubmitBtn').disabled = true;
+    try {
+      const res = await fetch(authMode === 'login' ? '/api/login' : '/api/register', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) { $('authStatus').textContent = data.error || '요청에 실패했습니다.'; $('authSubmitBtn').disabled = false; return; }
+      location.reload(); // URL은 그대로(/) — 로그인 쿠키가 생겼으니 새로고침만 해도 서버가 알아서 개인 데이터를 내려준다
+    } catch (e) {
+      $('authStatus').textContent = '네트워크 오류가 발생했습니다.';
+      $('authSubmitBtn').disabled = false;
+    }
+  }
+  $('authSubmitBtn').addEventListener('click', submitAuth);
+  $('authPasswordInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') submitAuth(); });
+  $('logoutBtn').addEventListener('click', async () => { await fetch('/api/logout', { method: 'POST' }); location.reload(); });
+  fetch('/api/whoami').then(r => r.json()).then(data => {
+    if (data.logged_in) {
+      $('authWho').textContent = data.username + '님';
+      $('logoutBtn').hidden = false;
+    } else {
+      $('authWho').textContent = '로그인하지 않음';
+      $('loginBtn').hidden = false;
+    }
+    // 버전 배지는 wikibot.env의 WIKIBOT_VERSION을 /api/whoami로 받아 그대로 표시한다(2026-09-18).
+    if (data.version) document.querySelectorAll('.version-badge').forEach(el => { el.textContent = 'v' + data.version; });
+  }).catch(() => {});
 
-  function modelSizeB(name) {
-    const m = name.match(/(\d+(?:\.\d+)?)b/i);
+  // ───────────────────────── 모델 목록 · 비교 설정 ─────────────────────────
+  let catalog = [];
+  let defaultModel = 'claude:sonnet';
+  let judgeModelLabel = 'Claude Haiku';
+  let adoptMargin = 3;
+  let compareOn = load('wb.compare', false);
+  let compareModels = load('wb.compareModels', null);
+
+  function modelLabel(id) {
+    const m = catalog.find(x => x.id === id);
+    return m ? m.label : (id || '').replace(/^(claude|ollama):/, '');
+  }
+  function modelSizeB(id) {
+    const m = (id || '').match(/(\d+(?:\.\d+)?)b/i);
     return m ? parseFloat(m[1]) : 0;
   }
-
-  function speedHint(name) {
-    const b = modelSizeB(name);
-    if (!b) return '';
-    if (b <= 3) return ' — 빠름';
-    if (b <= 4) return ' — 보통';
-    return ' — 느림, 정확도↑';
-  }
-
-  // mermaid 문법 오류로 다이어그램 렌더링에 실패하면 이보다 더 큰(정확한) 모델로
-  // 자동 재시도한다. 이미 가장 큰 모델을 쓰고 있었으면 재시도하지 않음.
+  // mermaid 문법 오류로 다이어그램 렌더링에 실패하면 더 큰(정확한) 로컬 모델로 자동 재시도한다.
+  // Claude 모델은 크기 개념이 없어서 재시도하지 않는다(로컬 Ollama 모델끼리만 승급).
   function pickEscalationModel(currentModel) {
-    const currentSize = modelSizeB(currentModel);
-    const bigger = availableModels
-      .filter(name => modelSizeB(name) > currentSize)
-      .sort((a, b) => modelSizeB(b) - modelSizeB(a));
-    return bigger[0] || null;
+    if (!currentModel || !currentModel.startsWith('ollama:')) return null;
+    const size = modelSizeB(currentModel);
+    const bigger = catalog.filter(m => m.id.startsWith('ollama:') && modelSizeB(m.id) > size)
+      .sort((a, b) => modelSizeB(b.id) - modelSizeB(a.id));
+    return bigger[0] ? bigger[0].id : null;
   }
 
   async function loadModels() {
     try {
-      const res = await fetch('/api/models');
-      const data = await res.json();
-      availableModels = data.models || [];
-      modelSelect.innerHTML = '';
-      availableModels.forEach(name => {
-        const opt = document.createElement('option');
-        opt.value = name;
-        opt.textContent = name + speedHint(name);
-        if (name === data.default) opt.selected = true;
-        modelSelect.appendChild(opt);
-      });
-      if (!availableModels.length) {
-        const opt = document.createElement('option');
-        opt.textContent = '로컬 모델 없음 (ollama serve 확인)';
-        modelSelect.appendChild(opt);
-      }
+      const data = await (await fetch('/api/models')).json();
+      catalog = data.catalog || [];
+      defaultModel = data.default_model || defaultModel;
+      judgeModelLabel = data.judge_model || judgeModelLabel;
+      adoptMargin = data.adopt_margin != null ? data.adopt_margin : adoptMargin;
+      if (!compareModels) compareModels = data.compare_default || [];
     } catch (e) {
-      modelSelect.innerHTML = '<option>모델 목록 불러오기 실패</option>';
+      catalog = [];
     }
+    $('marginNote').textContent = adoptMargin;
+    const saved = load('wb.model', null);
+    modelSelect.innerHTML = '';
+    catalog.forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = m.label + (m.available ? '' : ' (사용 불가)');
+      opt.disabled = !m.available;
+      modelSelect.appendChild(opt);
+    });
+    if (!catalog.length) modelSelect.innerHTML = '<option value="">모델 목록 없음</option>';
+    modelSelect.value = catalog.some(m => m.id === saved) ? saved : defaultModel;
+    renderComparePop();
   }
+  modelSelect.addEventListener('change', () => { store('wb.model', modelSelect.value); renderComparePop(); });
+
+  function renderComparePop() {
+    const list = $('compareList');
+    list.innerHTML = '';
+    const selected = new Set(compareModels || []);
+    catalog.filter(m => m.available).forEach(m => {
+      const isIncumbent = m.id === modelSelect.value;
+      const row = document.createElement('label');
+      row.innerHTML = `<input type="checkbox"> <span></span><small></small>`;
+      const cb = row.querySelector('input');
+      cb.checked = isIncumbent || selected.has(m.id);
+      cb.disabled = isIncumbent;
+      row.querySelector('span').textContent = m.label;
+      row.querySelector('small').textContent = isIncumbent ? '기본' : (m.note || '');
+      cb.addEventListener('change', () => {
+        const next = new Set(compareModels || []);
+        if (cb.checked) next.add(m.id); else next.delete(m.id);
+        compareModels = [...next];
+        store('wb.compareModels', compareModels);
+        renderCompareBtn();
+      });
+      list.appendChild(row);
+    });
+    renderCompareBtn();
+  }
+  function compareCandidates() {
+    const base = modelSelect.value;
+    const others = (compareModels || []).filter(m => m !== base && catalog.some(c => c.id === m && c.available));
+    return [base, ...others].slice(0, 3);
+  }
+  function renderCompareBtn() {
+    const cands = compareCandidates();
+    const active = compareOn && cands.length >= 2;
+    $('compareBtn').classList.toggle('on', active);
+    $('compareSwitch').classList.toggle('on', compareOn);
+    $('compareLbl').textContent = active ? `비교 ${cands.length}개` : '모델 비교';
+  }
+  $('compareBtn').addEventListener('click', (e) => { e.stopPropagation(); $('comparePop').hidden = !$('comparePop').hidden; });
+  $('compareSwitch').addEventListener('click', () => { compareOn = !compareOn; store('wb.compare', compareOn); renderCompareBtn(); });
+  document.addEventListener('click', (e) => { if (!e.target.closest('.compare-wrap')) $('comparePop').hidden = true; });
   loadModels();
 
-  function escapeHtml(s) {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
-
-  function renderInline(text) {
-    let t = escapeHtml(text);
-    t = t.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, '<img src="$2" alt="$1" loading="lazy">');
-    // 정상 마크다운 링크([텍스트](url))와, 모델이 가끔 깨뜨려 쓰는 형태
-    // (여는 대괄호 누락 등)에서도 살아남는 URL만이라도 클릭 가능하게 만든다
-    t = t.replace(
-      /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<)\]]+)/g,
-      (match, linkText, linkUrl, bareUrl) => {
-        const url = bareUrl || linkUrl;
-        const label = bareUrl || linkText;
-        return `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`;
-      }
-    );
-    t = t.replace(/`([^`]+)`/g, '<code>$1</code>');
-    t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-    return t;
-  }
-
-  const FENCE_RE = /```(\w+)?\n([\s\S]*?)```/g;
-
-  // 모델이 가끔 코드펜스를 홀수개(닫는 ``` 하나 누락)로 생성하면, 그 뒤 전체가
-  // FENCE_RE 매칭에서 밀려나 "mermaid"라는 단어까지 포함해 통째로 일반 텍스트로
-  // 노출된다(실측). 정식 펜스를 못 찾은 경우를 대비해, 펜스 없이 맨 줄로 등장한
-  // "mermaid" 다음에 다이어그램 문법이 바로 이어지면 렌더링 전에 펜스를 복구한다.
-  const BARE_MERMAID_RE = /(^|\n)[ \t]*mermaid[ \t]*\n((?:sequenceDiagram|graph\s|flowchart\s|classDiagram|stateDiagram|erDiagram|gantt|pie|journey|gitGraph|mindmap|timeline)[\s\S]*?)(?=\n[ \t]*\n|$)/gi;
-
-  function repairUnfencedMermaid(text) {
-    return text.replace(BARE_MERMAID_RE, (match, lead, body) => `${lead}\`\`\`mermaid\n${body}\n\`\`\``);
-  }
-
-  function appendCodeBlock(bubble, code) {
-    const pre = document.createElement('pre');
-    const codeEl = document.createElement('code');
-    codeEl.textContent = code;
-    pre.appendChild(codeEl);
-    bubble.appendChild(pre);
-  }
-
-  // 모델이 생성한 mermaid 문법이 틀리면 mermaid.js가 그 자리에 자체 에러 박스
-  // ("Syntax error in text...")를 그려버려서 UX가 지저분해짐. run() 전에 parse()로
-  // 먼저 검증해서, 틀리면 에러 박스 대신 원본 코드만 보여준다.
-  //
-  // parse()가 끝나길 기다린 "뒤에" bubble에 붙이면, 그 사이 뒤따르는 텍스트 블록들이
-  // (동기 처리라) 먼저 붙어버려서 다이어그램이 메시지 맨 끝으로 밀리는 순서 버그가
-  // 실측됨(다이어그램 여러 개 있는 답변에서 전부 참고자료 링크 뒤로 밀려 나옴). 그래서
-  // placeholder를 먼저 동기적으로 제자리에 붙여 순서를 확보하고, parse 결과에 따라
-  // 그 자리에서 성공/실패 내용으로 교체한다.
-  function appendMermaidBlock(bubble, code) {
-    const pre = document.createElement('pre');
-    pre.className = 'mermaid';
-    pre.textContent = code;
-    bubble.appendChild(pre); // 자리 먼저 확보(동기) — 텍스트 블록과 순서가 안 뒤바뀌게 함
-
-    return mermaid.parse(code).then(
-      () => pre,
-      () => {
-        const note = document.createElement('div');
-        note.className = 'mermaid-error-note';
-        note.textContent = '⚠️ 다이어그램 생성에 실패했습니다 (문법 오류) — 원본 코드만 표시합니다';
-        const codePre = document.createElement('pre');
-        const codeEl = document.createElement('code');
-        codeEl.textContent = code;
-        codePre.appendChild(codeEl);
-        pre.replaceWith(note, codePre); // 같은 위치에서 placeholder를 에러 내용으로 교체
-        return null;
-      }
-    );
-  }
-
-  const TABLE_ROW_RE = /^\s*\|(.+)\|\s*$/;
-  const TABLE_SEP_RE = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
-  const HEADING_RE = /^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/;
-
-  function parseTableRow(line) {
-    let inner = line.trim();
-    if (inner.startsWith('|')) inner = inner.slice(1);
-    if (inner.endsWith('|')) inner = inner.slice(0, -1);
-    return inner.split('|').map(c => c.trim());
-  }
-
-  // 마크다운 표(| a | b |\n|---|---|\n| ... |)를 실제 <table>로 렌더링한다.
-  // 표가 아닌 줄은 기존처럼 renderInline(굵게/링크/이미지/코드)을 그대로 적용.
-  function renderTextBlock(container, text) {
-    const lines = text.split('\n');
-    let i = 0;
-    let buffer = [];
-
-    function flushParagraph() {
-      if (!buffer.length) return;
-      const div = document.createElement('div');
-      div.innerHTML = renderInline(buffer.join('\n'));
-      container.appendChild(div);
-      buffer = [];
-    }
-
-    while (i < lines.length) {
-      const line = lines[i];
-      const next = lines[i + 1];
-      const headingMatch = line.match(HEADING_RE);
-      if (headingMatch) {
-        flushParagraph();
-        const level = headingMatch[1].length;
-        const h = document.createElement(`h${level}`);
-        h.innerHTML = renderInline(headingMatch[2]);
-        container.appendChild(h);
-        i++;
-        continue;
-      }
-      if (TABLE_ROW_RE.test(line) && next !== undefined && TABLE_SEP_RE.test(next)) {
-        flushParagraph();
-        const headerCells = parseTableRow(line);
-        i += 2;
-        const rows = [];
-        while (i < lines.length && TABLE_ROW_RE.test(lines[i])) {
-          rows.push(parseTableRow(lines[i]));
-          i++;
-        }
-
-        const wrap = document.createElement('div');
-        wrap.className = 'table-wrap';
-        const table = document.createElement('table');
-        table.className = 'md-table';
-
-        const thead = document.createElement('thead');
-        const headRow = document.createElement('tr');
-        headerCells.forEach(c => {
-          const th = document.createElement('th');
-          th.innerHTML = renderInline(c);
-          headRow.appendChild(th);
-        });
-        thead.appendChild(headRow);
-        table.appendChild(thead);
-
-        const tbody = document.createElement('tbody');
-        rows.forEach(r => {
-          const tr = document.createElement('tr');
-          r.forEach(c => {
-            const td = document.createElement('td');
-            td.innerHTML = renderInline(c);
-            tr.appendChild(td);
-          });
-          tbody.appendChild(tr);
-        });
-        table.appendChild(tbody);
-
-        wrap.appendChild(table);
-        container.appendChild(wrap);
-        continue;
-      }
-      buffer.push(line);
-      i++;
-    }
-    flushParagraph();
-  }
-
-  async function renderMessage(bubble, text) {
-    bubble.innerHTML = '';
-    text = repairUnfencedMermaid(text);
-    let lastIndex = 0;
-    let m;
-    FENCE_RE.lastIndex = 0;
-    const mermaidPending = [];
-    while ((m = FENCE_RE.exec(text)) !== null) {
-      if (m.index > lastIndex) {
-        renderTextBlock(bubble, text.slice(lastIndex, m.index));
-      }
-      const lang = (m[1] || '').toLowerCase();
-      const code = m[2];
-      if (lang === 'mermaid' && window.mermaid) {
-        mermaidPending.push(appendMermaidBlock(bubble, code));
-      } else {
-        appendCodeBlock(bubble, code);
-      }
-      lastIndex = FENCE_RE.lastIndex;
-    }
-    if (lastIndex < text.length) {
-      renderTextBlock(bubble, text.slice(lastIndex));
-    }
-
-    if (mermaidPending.length) {
-      const resolved = await Promise.all(mermaidPending);
-      const nodes = resolved.filter(Boolean);
-      if (nodes.length) {
-        mermaid.run({ nodes }).catch(() => {});
-      }
-      return nodes.length < mermaidPending.length; // true면 하나 이상 파싱 실패
-    }
-    return false;
-  }
-
-  function sourceIcon(type) {
-    if (type === 'confluence') return '🔗';
-    if (type === 'jira') return '🎫';
-    return '📄';
-  }
-
-  function buildSourcesBlock(sources) {
-    if (!sources || !sources.length) return null;
-    const block = document.createElement('div');
-    block.className = 'sources-block';
-
-    const toggle = document.createElement('div');
-    toggle.className = 'sources-toggle';
-    toggle.innerHTML = `<span>${sources.length} Sources</span><span class="chevron">▾</span>`;
-    toggle.addEventListener('click', () => block.classList.toggle('open'));
-
-    const list = document.createElement('div');
-    list.className = 'sources-list';
-    sources.forEach(s => {
-      const item = document.createElement('div');
-      item.className = 'source-item';
-      const icon = document.createElement('span');
-      icon.className = 'icon';
-      icon.textContent = sourceIcon(s.type);
-      item.appendChild(icon);
-      if (s.url) {
-        const a = document.createElement('a');
-        a.href = s.url;
-        a.target = '_blank';
-        a.rel = 'noopener noreferrer';
-        a.textContent = s.label;
-        item.appendChild(a);
-      } else {
-        const span = document.createElement('span');
-        span.className = 'plain';
-        span.textContent = s.label;
-        item.appendChild(span);
-      }
-      list.appendChild(item);
-    });
-
-    block.appendChild(toggle);
-    block.appendChild(list);
-    return block;
-  }
-
-  // 이 위키봇은 사내망 http(평문)로 서빙돼서 navigator.clipboard가 secure
-  // context(https/localhost)에서만 열리는 브라우저 제약에 걸려 아예 없거나
-  // 조용히 실패할 수 있다 — execCommand('copy')로 폴백(오래됐지만 http에서도
-  // 대부분 아직 동작함).
+  // 사내망 http(평문)로 서빙돼서 navigator.clipboard가 없을 수 있다 — execCommand('copy')로 폴백.
   function copyTextToClipboard(text) {
-    if (navigator.clipboard && window.isSecureContext) {
-      return navigator.clipboard.writeText(text);
-    }
+    if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
     return new Promise((resolve, reject) => {
       const ta = document.createElement('textarea');
       ta.value = text;
@@ -1136,343 +458,1031 @@
       ta.focus();
       ta.select();
       let ok = false;
-      try {
-        ok = document.execCommand('copy');
-      } catch (e) {
-        // no-op — 아래 finally 후 reject
-      }
+      try { ok = document.execCommand('copy'); } catch (e) {}
       document.body.removeChild(ta);
       ok ? resolve() : reject(new Error('복사에 실패했습니다'));
     });
   }
 
-  function appendMessageActions(bubble, sources, transcript) {
+  // ───────────────────────── 메시지 ─────────────────────────
+  function sourceKind(s) {
+    if (s.type === 'jira') return 'Jira';
+    if (s.type === 'file') return '첨부';
+    if (s.type === 'confluence') return 'Wiki';
+    return '문서';
+  }
+  function buildSourcesBlock(sources) {
+    if (!sources || !sources.length) return null;
+    const block = document.createElement('div');
+    block.className = 'sources-block';
+    const list = document.createElement('div');
+    list.className = 'sources-list';
+    sources.forEach(s => {
+      const item = document.createElement('div');
+      item.className = 'source-item';
+      item.innerHTML = `<span class="kind">${sourceKind(s)}</span>`;
+      const el = document.createElement(s.url ? 'a' : 'span');
+      if (s.url) { el.href = s.url; el.target = '_blank'; el.rel = 'noopener noreferrer'; }
+      el.textContent = s.label;
+      item.appendChild(el);
+      list.appendChild(item);
+    });
+    block.appendChild(list);
+    return block;
+  }
+
+  function addMessage(role, text, opts = {}) {
+    const wrap = document.createElement('div');
+    wrap.className = 'msg ' + role;
+    const roleEl = document.createElement('div');
+    roleEl.className = 'message-role';
+    if (role === 'assistant') {
+      roleEl.innerHTML = '<span>위키봇</span><span class="model-tag"></span>';
+      if (opts.model) roleEl.querySelector('.model-tag').textContent = '· ' + modelLabel(opts.model);
+    } else {
+      roleEl.textContent = '나';
+    }
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    if (text) renderMessage(bubble, text);
+    let avatar = null;
+    if (role === 'assistant') {
+      // 로봇이 답하는 모양: 왼쪽에 로봇 캐릭터, 오른쪽에 이름·답변
+      avatar = document.createElement('span');
+      avatar.innerHTML = robotHtml(opts.state || 'ready');
+      avatar = avatar.firstChild;
+      const content = document.createElement('div');
+      content.className = 'message-content';
+      content.appendChild(roleEl);
+      content.appendChild(bubble);
+      wrap.appendChild(avatar);
+      wrap.appendChild(content);
+    } else {
+      wrap.appendChild(roleEl);
+      wrap.appendChild(bubble);
+    }
+    messagesEl.appendChild(wrap);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return { wrap, bubble, roleEl, avatar };
+  }
+  function setRobot(msg, state) {
+    if (!msg.avatar) return;
+    const tmp = document.createElement('span');
+    tmp.innerHTML = robotHtml(state);
+    const next = tmp.firstChild;
+    msg.avatar.replaceWith(next);
+    msg.avatar = next;
+  }
+
+  // 로봇이 직접 타이핑하듯 답변을 앞에서부터 흘려 쓴다. 서버는 답을 한 번에 주므로 화면에서만
+  // 연출하는 것(약 2초). 사용자가 위로 스크롤해 읽는 중이면 아래로 끌어내리지 않는다.
+  const REDUCED_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  async function typeOut(bubble, text) {
+    if (REDUCED_MOTION || !text || text.length < 40) return renderMessage(bubble, text);
+    const step = Math.max(6, Math.ceil(text.length / 90));
+    for (let n = step; n < text.length; n += step) {
+      const nearBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
+      renderPreview(bubble, text.slice(0, n));
+      const last = bubble.lastElementChild || bubble;
+      last.insertAdjacentHTML('beforeend', '<span class="amicro-stream-cursor"></span>');
+      if (nearBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
+      await new Promise(r => setTimeout(r, 22));
+    }
+    return renderMessage(bubble, text);
+  }
+
+  function appendMessageActions(msg, sources, transcript, runId) {
     const row = document.createElement('div');
     row.className = 'msg-actions';
 
-    const sourcesBlock = buildSourcesBlock(sources);
-    if (sourcesBlock) row.appendChild(sourcesBlock);
+    if (runId) {
+      const runBtn = document.createElement('button');
+      runBtn.type = 'button';
+      runBtn.className = 'chip-btn';
+      runBtn.innerHTML = icon('flow') + '과정 보기';
+      runBtn.addEventListener('click', () => {
+        focusMessage(msg.wrap);
+        openRun(runId, sources);
+        $('view-chat').classList.remove('wb-collapsed');
+        store('wb.collapsed', false);
+        shell.classList.add('wb-open');
+      });
+      row.appendChild(runBtn);
+    }
 
-    // 이모지(📋/✅)는 브라우저가 항상 고유 색으로 그려서 CSS color를 안 따른다 —
-    // "색깔없게" 요청(2026-09-18)에 맞춰 currentColor를 쓰는 인라인 SVG로 교체,
-    // 버튼 글자색(var(--text-dim)/hover 시 var(--text))을 그대로 물려받는다.
-    const COPY_ICON_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
-    const CHECK_ICON_SVG = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+    const sourcesBlock = buildSourcesBlock(sources);
+    if (sourcesBlock) {
+      const tgl = document.createElement('button');
+      tgl.type = 'button';
+      tgl.className = 'chip-btn';
+      tgl.innerHTML = icon('link') + `출처 ${sources.length}`;
+      tgl.addEventListener('click', () => sourcesBlock.classList.toggle('open'));
+      row.appendChild(tgl);
+    }
 
     const copyBtn = document.createElement('button');
     copyBtn.type = 'button';
-    copyBtn.className = 'copy-btn';
+    copyBtn.className = 'chip-btn square';
     copyBtn.title = '답변 복사';
     copyBtn.setAttribute('aria-label', '답변 복사');
-    copyBtn.innerHTML = COPY_ICON_SVG;
+    copyBtn.innerHTML = icon('copy');
     copyBtn.addEventListener('click', () => {
       const last = transcript && transcript.length ? transcript[transcript.length - 1] : null;
-      const answerText = last && last.role === 'assistant' ? last.content : '';
-      copyTextToClipboard(answerText).then(() => {
-        copyBtn.innerHTML = CHECK_ICON_SVG;
-        setTimeout(() => {
-          copyBtn.innerHTML = COPY_ICON_SVG;
-        }, 1500);
-      }).catch(() => {
-        copyBtn.title = '복사 실패 — 직접 선택해 복사해주세요';
-      });
+      copyTextToClipboard(last && last.role === 'assistant' ? last.content : '').then(() => {
+        copyBtn.innerHTML = icon('check');
+        setTimeout(() => { copyBtn.innerHTML = icon('copy'); }, 1500);
+      }).catch(() => { copyBtn.title = '복사 실패 — 직접 선택해 복사해주세요'; });
     });
     row.appendChild(copyBtn);
 
     const feedbackBtn = document.createElement('button');
     feedbackBtn.type = 'button';
-    feedbackBtn.className = 'feedback-btn';
-    feedbackBtn.textContent = '수정요청';
+    feedbackBtn.className = 'chip-btn';
+    feedbackBtn.innerHTML = icon('flag') + '수정요청';
     feedbackBtn.addEventListener('click', () => openFeedbackModal(transcript));
     row.appendChild(feedbackBtn);
 
-    bubble.appendChild(row);
+    if (sourcesBlock) row.appendChild(sourcesBlock);
+    msg.bubble.appendChild(row);
+  }
+  function focusMessage(wrap) {
+    messagesEl.querySelectorAll('.msg.is-focused').forEach(el => el.classList.remove('is-focused'));
+    if (wrap) wrap.classList.add('is-focused');
   }
 
-  function addMessage(role, text) {
-    const wrap = document.createElement('div');
-    wrap.className = 'msg ' + role;
+  // ───────────────────────── 작업대(실행 과정) ─────────────────────────
+  // 서버(run_trace.Tracer)가 보내는 이벤트를 한 상태로 접는다. 라이브 스트림과 저장된 기록
+  // 재생이 같은 reducer를 쓰므로 두 화면이 항상 똑같이 보인다.
+  const PLANNED_STEPS = [
+    ['receive', '질문 접수'],
+    ['expand', '질문 분석 · 검색어 확장'],
+    ['search', 'Rovo 검색 · 원본 질의'],
+    ['search_expanded', 'Rovo 검색 · 확장 질의'],
+    ['context', '참고 자료 구성'],
+    ['generate', '답변 생성'],
+    ['judge', '답변 채점 · 채택 판정'],
+    ['save', '대화·실행 기록 저장'],
+  ];
+  let wb = null;          // 현재 작업대에 보이는 run 상태
+  let liveRunId = null;   // 지금 스트리밍 중인 run
 
-    const bubble = document.createElement('div');
-    bubble.className = 'bubble';
-    renderMessage(bubble, text);
-
-    wrap.appendChild(bubble);
-    messagesEl.appendChild(wrap);
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-    return bubble;
+  function newRunState(meta) {
+    return {
+      id: meta.run_id || meta.id || null,
+      question: meta.question || '',
+      mode: meta.mode || 'single',
+      plannedCandidates: meta.candidates || [],
+      status: 'running',
+      steps: [], stepIndex: {},
+      candidates: {}, candOrder: [],
+      verdict: null, sources: meta.sources || [], log: [], error: null,
+      durationMs: null, startedAt: Date.now(),
+    };
+  }
+  function applyEvent(st, ev) {
+    if (!ev || ev.type === 'ping' || ev.type === 'start') return;
+    if (ev.type !== 'final') st.log.push(ev);
+    if (ev.type === 'step') {
+      const idx = st.stepIndex[ev.key];
+      if (idx == null) { st.stepIndex[ev.key] = st.steps.length; st.steps.push(Object.assign({}, ev)); }
+      else Object.assign(st.steps[idx], ev);
+    } else if (ev.type === 'candidate') {
+      if (!st.candidates[ev.model]) st.candOrder.push(ev.model);
+      st.candidates[ev.model] = Object.assign(st.candidates[ev.model] || {}, ev);
+    } else if (ev.type === 'verdict') {
+      st.verdict = ev;
+    } else if (ev.type === 'final') {
+      st.status = 'done';
+      st.sources = ev.sources || st.sources;
+      (ev.candidates || []).forEach(c => {
+        if (!st.candidates[c.model]) st.candOrder.push(c.model);
+        st.candidates[c.model] = Object.assign(st.candidates[c.model] || {}, c);
+      });
+      if (ev.verdict) st.verdict = Object.assign({}, st.verdict || {}, ev.verdict);
+      st.durationMs = Date.now() - st.startedAt;
+    } else if (ev.type === 'error') {
+      st.error = ev.error;
+      if (ev.fatal) st.status = 'error';
+    }
+  }
+  function runStateFromRecord(run, sources) {
+    const st = newRunState({ id: run.id, question: run.question, mode: run.mode, sources: sources || [] });
+    (run.events || []).forEach(ev => applyEvent(st, ev));
+    (run.candidates || []).forEach(c => {
+      if (!st.candidates[c.model]) st.candOrder.push(c.model);
+      st.candidates[c.model] = Object.assign(st.candidates[c.model] || {}, c);
+    });
+    if (run.verdict) st.verdict = Object.assign({}, st.verdict || {}, run.verdict);
+    st.status = run.live ? 'running' : run.status === 'running' ? 'error' : run.status;
+    if (run.status === 'running' && !run.live) st.error = '서버가 이 작업을 끝내지 못했습니다(중간에 재시작 등).';
+    if (run.live) st.startedAt = Date.now() - (run.duration_ms || 0);
+    st.durationMs = run.duration_ms;
+    st.createdAt = run.created_at;
+    return st;
   }
 
-  // ── 수정요청(피드백) 이메일 ──
-
-  const feedbackOverlay = document.getElementById('feedbackOverlay');
-  const feedbackMessageEl = document.getElementById('feedbackMessage');
-  const feedbackStatusEl = document.getElementById('feedbackStatus');
-  const feedbackCancelBtn = document.getElementById('feedbackCancelBtn');
-  const feedbackSendBtn = document.getElementById('feedbackSendBtn');
-  let feedbackContext = { transcript: [] };
-
-  function openFeedbackModal(transcript) {
-    feedbackContext = { transcript: transcript || [] };
-    feedbackMessageEl.value = '';
-    feedbackStatusEl.textContent = '';
-    feedbackStatusEl.className = 'feedback-status';
-    feedbackSendBtn.disabled = false;
-    feedbackOverlay.classList.remove('hidden');
-    feedbackMessageEl.focus();
+  function stepRows(st) {
+    const rows = st.steps.slice();
+    if (st.status === 'running') {
+      const seen = new Set(rows.map(r => r.key));
+      PLANNED_STEPS.forEach(([key, label]) => {
+        if (seen.has(key)) return;
+        if (key === 'judge' && st.mode !== 'compare') return;
+        rows.push({ key, label, status: 'pending' });
+      });
+    }
+    return rows;
   }
 
-  function closeFeedbackModal() {
-    feedbackOverlay.classList.add('hidden');
-  }
-
-  feedbackCancelBtn.addEventListener('click', closeFeedbackModal);
-  feedbackOverlay.addEventListener('click', (e) => {
-    if (e.target === feedbackOverlay) closeFeedbackModal();
-  });
-
-  feedbackSendBtn.addEventListener('click', async () => {
-    const message = feedbackMessageEl.value.trim();
-    if (!message) {
-      feedbackStatusEl.textContent = '보낼 내용을 입력해주세요.';
-      feedbackStatusEl.className = 'feedback-status error';
-      feedbackMessageEl.focus();
+  function renderWorkbench() {
+    const st = wb;
+    if (!st) {
+      workbenchEl.innerHTML = `
+        <button class="icon-btn work-status-close" type="button" data-close aria-label="작업대 닫기">${icon('x')}</button>
+        <div class="build-status-head"><div><h2>작업대</h2>
+          <span class="product-status status-idle"><i></i>대기</span>
+          <small>질문을 보내면 처리 과정이 여기에 실시간으로 표시됩니다</small></div></div>
+        <section class="wb-section"><header><span>작업 단계</span><strong>예정</strong></header>
+          <ol class="progress-rail">${PLANNED_STEPS.map(([k, l]) => `<li class="pending"><span class="mark"></span><div class="step-main"><div class="step-label">${l}</div></div><span></span></li>`).join('')}</ol>
+        </section>
+        <p class="wb-empty">“모델 비교”를 켜면 여러 모델이 같은 자료로 답하고, 어느 모델인지 가린 채 채점해 더 나은 답을 채택합니다. 채택·탈락 판정과 점수가 이 작업대와 실행 기록에 남습니다.</p>`;
+      bindWorkbenchClose();
       return;
     }
-    feedbackSendBtn.disabled = true;
+    const statusKind = st.status === 'running' ? 'running' : st.status === 'error' ? 'error' : 'done';
+    const statusText = st.status === 'running' ? '답변 만드는 중' : st.status === 'error' ? '오류' : '답변 완료';
+    const running = st.steps.find(s => s.status === 'running');
+    const sub = st.status === 'running'
+      ? (running ? running.label + ' 중…' : '시작하는 중…') + ' · 닫아도 계속 만듭니다'
+      : [st.createdAt ? fmtTime(st.createdAt) : null, st.durationMs != null ? '총 ' + fmtMs(st.durationMs) : null, st.mode === 'compare' ? '모델 비교' : '단일 모델'].filter(Boolean).join(' · ');
+    const rows = stepRows(st);
+    const doneCount = st.steps.filter(s => s.status === 'done' || s.status === 'skip').length;
+
+    let html = `
+      <button class="icon-btn work-status-close" type="button" data-close aria-label="작업대 닫기">${icon('x')}</button>
+      <div class="build-status-head"><div><h2>작업대</h2>
+        <span class="product-status status-${statusKind}"><i></i>${statusText}</span>
+        <small>${escapeHtml(sub)}</small></div></div>`;
+    if (st.question) html += `<div class="wb-question">“${escapeHtml(st.question)}”</div>`;
+    if (st.error) html += `<div class="wb-error">${escapeHtml(st.error)}</div>`;
+
+    html += `<section class="wb-section"><header><span>작업 단계</span><strong>${st.status === 'running' ? (running ? escapeHtml(running.label) : '준비 중') : doneCount + '단계 완료'}</strong></header><ol class="progress-rail">`;
+    rows.forEach(s => {
+      const mark = s.status === 'done' ? `<svg class="i"><use href="#i-check"/></svg>` : s.status === 'error' ? `<svg class="i"><use href="#i-x"/></svg>` : '';
+      const items = (s.items || []).filter(Boolean).slice(0, 6).map(t => `<li>${escapeHtml(t)}</li>`).join('');
+      html += `<li class="${s.status}"><span class="mark">${mark}</span><div class="step-main">
+        <div class="step-label">${escapeHtml(s.label)}</div>
+        ${s.detail ? `<div class="step-detail">${escapeHtml(s.detail)}</div>` : ''}
+        ${items ? `<ul class="step-items">${items}</ul>` : ''}</div>
+        <span class="step-ms">${s.ms != null && s.status !== 'pending' ? fmtMs(s.ms) : ''}</span></li>`;
+    });
+    html += `</ol></section>`;
+
+    const cands = st.candOrder.map(id => st.candidates[id]);
+    if (!cands.length && st.plannedCandidates.length) {
+      st.plannedCandidates.forEach(id => cands.push({ model: id, label: modelLabel(id), status: 'pending' }));
+    }
+    if (cands.length) {
+      const isCompare = st.mode === 'compare';
+      html += `<section class="wb-section"><header><span>${isCompare ? '모델 비교' : '답변 모델'}</span><strong>${st.verdict && st.verdict.adopted_label ? escapeHtml(st.verdict.adopted_label) + ' 채택' : (isCompare ? cands.length + '개 경합' : '')}</strong></header>
+        <table class="hero-record-table"><thead><tr><th>모델</th>${isCompare ? '<th class="num">점수</th>' : ''}<th class="num">시간</th><th>판정</th></tr></thead><tbody>`;
+      cands.forEach(c => {
+        const adopted = c.decision === '채택';
+        const stamp = c.decision ? `<span class="stamp ${adopted ? 'adopt' : 'reject'}">${c.decision}</span>`
+          : c.status === 'error' ? '<span class="stamp reject">실패</span>'
+          : `<span class="stamp wait">${c.status === 'done' ? '채점 대기' : c.status === 'pending' ? '대기' : '생성 중'}</span>`;
+        const sub = c.status === 'error' ? (c.error || '생성 실패') : c.chars ? c.chars.toLocaleString() + '자' : '';
+        const score = c.score != null ? `<strong>${c.score}</strong><div class="score-bar"><i style="width:${Math.max(2, Math.min(100, c.score))}%"></i></div>` : '<small>—</small>';
+        const clickable = isCompare && c.answer;
+        html += `<tr class="${adopted ? 'is-adopted' : ''} ${clickable ? 'clickable' : ''}" data-model="${escapeHtml(c.model)}">
+          <td><strong>${escapeHtml(c.label || modelLabel(c.model))}</strong><small>${escapeHtml(sub)}</small></td>
+          ${isCompare ? `<td class="num">${score}</td>` : ''}
+          <td class="num"><small>${fmtMs(c.ms) || '…'}</small></td><td>${stamp}</td></tr>`;
+      });
+      html += `</tbody></table>`;
+      if (isCompare) {
+        const v = st.verdict;
+        html += `<p class="hero-record-gate">채택 기준: <b>블라인드 심사(${escapeHtml((v && v.judged_by && v.judged_by !== 'heuristic') ? v.judged_by : judgeModelLabel)}) 70% + 규칙 점수 30%</b>.
+          기본 모델을 바꾸려면 최소 ${v ? v.required_margin : adoptMargin}점 차이 필요${v && v.margin != null ? ` → 1·2위 차이 <b>${v.margin}점</b>` : ''}${v && v.rule ? ` · ${escapeHtml(v.rule)}` : ''}${v && v.judged_by === 'heuristic' ? ' · 심사 실패로 규칙 점수만 사용' : ''}.
+          ${cands.some(c => c.answer) ? '행을 누르면 그 모델의 답변 원문과 채점 근거를 봅니다.' : ''}</p>`;
+      }
+      html += `</section>`;
+    }
+
+    if (st.sources && st.sources.length) {
+      html += `<section class="wb-section"><header><span>참고 자료</span><strong>${st.sources.length}건</strong></header><ul class="wb-sources">`;
+      st.sources.forEach(s => {
+        html += `<li><span class="kind">${sourceKind(s)}</span>${s.url ? `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(s.label)}">${escapeHtml(s.label)}</a>` : `<span>${escapeHtml(s.label)}</span>`}</li>`;
+      });
+      html += `</ul></section>`;
+    }
+
+    if (st.log.length) {
+      html += `<details class="status-details"><summary>실행 로그 · 이벤트 ${st.log.length}개</summary><ol class="event-ledger">`;
+      st.log.forEach(ev => {
+        let text;
+        if (ev.type === 'step') text = `${ev.status.padEnd(7)} ${ev.label}${ev.detail ? ' — ' + ev.detail : ''}`;
+        else if (ev.type === 'candidate') text = `model   ${ev.label} ${ev.status}${ev.ms != null ? ' ' + fmtMs(ev.ms) : ''}${ev.error ? ' — ' + ev.error : ''}`;
+        else if (ev.type === 'verdict') text = `verdict ${ev.adopted_label} 채택 (${ev.rule})`;
+        else text = `${ev.type} ${ev.error || ''}`;
+        const err = ev.status === 'error' || ev.type === 'error';
+        html += `<li class="${err ? 'err' : ''}"><span>${(ev.t / 1000).toFixed(2)}s</span><span>${escapeHtml(text)}</span></li>`;
+      });
+      html += `</ol></details>`;
+    }
+    workbenchEl.innerHTML = html;
+    bindWorkbenchClose();
+    workbenchEl.querySelectorAll('tr.clickable').forEach(tr => {
+      tr.addEventListener('click', () => openCandidate(st.candidates[tr.dataset.model]));
+    });
+  }
+  function bindWorkbenchClose() {
+    const b = workbenchEl.querySelector('[data-close]');
+    if (b) b.addEventListener('click', () => shell.classList.remove('wb-open'));
+  }
+
+  async function openRun(runId, sources) {
+    if (!runId) { wb = null; renderWorkbench(); return; }
+    if (runId === liveRunId && wb && wb.id === runId) { renderWorkbench(); return; }
+    try {
+      const res = await fetch('/api/runs/' + runId);
+      if (!res.ok) throw new Error();
+      wb = runStateFromRecord(await res.json(), sources);
+    } catch (e) {
+      wb = null;
+    }
+    renderWorkbench();
+  }
+
+  function openCandidate(c) {
+    if (!c) return;
+    $('viewerTitle').textContent = `${c.label || modelLabel(c.model)} — ${c.decision || ''}`;
+    const body = $('viewerBody');
+    body.innerHTML = '';
+    const meta = document.createElement('div');
+    meta.className = 'candidate-meta';
+    const j = c.judge || {};
+    meta.innerHTML = `<span>최종 <b>${c.score != null ? c.score : '—'}</b>점</span>
+      ${c.judge ? `<span>심사 <b>${j.score}</b> (근거 ${j.grounded} · 관련 ${j.relevant} · 완결 ${j.complete})</span>` : ''}
+      <span>규칙 <b>${c.heuristic != null ? c.heuristic : '—'}</b></span>
+      <span>생성 ${fmtMs(c.ms)}</span>${c.blind_label ? `<span>심사 시 “답변 ${escapeHtml(c.blind_label)}”</span>` : ''}`;
+    body.appendChild(meta);
+    if (j.reason) {
+      const p = document.createElement('p');
+      p.className = 'modal-sub';
+      p.style.margin = '0 0 10px';
+      p.textContent = '심사 의견: ' + j.reason;
+      body.appendChild(p);
+    }
+    if (c.heuristic_notes && c.heuristic_notes.length) {
+      const ul = document.createElement('ul');
+      ul.className = 'candidate-notes';
+      c.heuristic_notes.forEach(n => { const li = document.createElement('li'); li.textContent = n; ul.appendChild(li); });
+      body.appendChild(ul);
+    }
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.style.borderTop = '1px solid var(--line)';
+    bubble.style.paddingTop = '12px';
+    body.appendChild(bubble);
+    renderMessage(bubble, c.answer || '(답변 원문 없음)');
+    $('viewerOverlay').classList.remove('hidden');
+  }
+  $('viewerClose').addEventListener('click', () => $('viewerOverlay').classList.add('hidden'));
+  $('viewerOverlay').addEventListener('click', (e) => { if (e.target === $('viewerOverlay')) $('viewerOverlay').classList.add('hidden'); });
+  renderWorkbench();
+
+  // ───────────────────────── 수정요청(피드백) 이메일 ─────────────────────────
+  const feedbackOverlay = $('feedbackOverlay');
+  let feedbackContext = { transcript: [] };
+  function openFeedbackModal(transcript) {
+    feedbackContext = { transcript: transcript || [] };
+    $('feedbackMessage').value = '';
+    $('feedbackStatus').textContent = '';
+    $('feedbackSendBtn').disabled = false;
+    feedbackOverlay.classList.remove('hidden');
+    $('feedbackMessage').focus();
+  }
+  $('feedbackCancelBtn').addEventListener('click', () => feedbackOverlay.classList.add('hidden'));
+  feedbackOverlay.addEventListener('click', (e) => { if (e.target === feedbackOverlay) feedbackOverlay.classList.add('hidden'); });
+  $('feedbackSendBtn').addEventListener('click', async () => {
+    const message = $('feedbackMessage').value.trim();
+    if (!message) { $('feedbackStatus').textContent = '보낼 내용을 입력해주세요.'; $('feedbackMessage').focus(); return; }
+    $('feedbackSendBtn').disabled = true;
     try {
       const res = await fetch('/api/feedback', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message,
-          transcript: feedbackContext.transcript,
-          conversation_id: currentConversationId,
-        }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message, transcript: feedbackContext.transcript, conversation_id: currentConversationId }),
       });
       const data = await res.json();
       if (!res.ok || data.error) throw new Error(data.error || '전송 실패');
-      closeFeedbackModal();
+      feedbackOverlay.classList.add('hidden');
     } catch (err) {
-      feedbackStatusEl.textContent = '전송 실패: ' + err.message;
-      feedbackStatusEl.className = 'feedback-status error';
-      feedbackSendBtn.disabled = false;
+      $('feedbackStatus').textContent = '전송 실패: ' + err.message;
+      $('feedbackSendBtn').disabled = false;
     }
   });
 
-  // ── 사이드바: 대화 목록 (Rovo Chat 스타일 — 왼쪽에서 과거 대화를 열람) ──
+  // ───────────────────────── 대화 목록 ─────────────────────────
+  let history = [];
+  let currentConversationId = null;
+  let currentTitle = '';
+  let busy = false;
 
-  async function loadConversations() {
-    try {
-      const res = await fetch('/api/conversations');
-      const data = await res.json();
-      renderConvList(data.conversations || []);
-    } catch (e) {
-      convListEl.innerHTML = '<div id="convEmpty">대화 목록을 불러오지 못했습니다</div>';
-    }
-  }
+  // 사이드바 "최근 대화" 목록은 실행 기록과 겹쳐서 없앴다(2026-10-07, 사용자 요청) — 지난 대화는
+  // 실행 기록 화면에서 열고 지운다. 예전 호출부와의 호환을 위해 이름만 남겨 실행 기록 수를 갱신한다.
+  function loadConversations() { refreshRunCount(); }
 
-  function renderConvList(list) {
-    convListEl.innerHTML = '';
-    if (!list.length) {
-      convListEl.innerHTML = '<div id="convEmpty">아직 대화가 없습니다</div>';
-      return;
-    }
-    list.forEach(conv => {
-      const isDeleted = !!conv.deleted_at;
-      const item = document.createElement('div');
-      item.className = 'conv-item' + (conv.id === currentConversationId ? ' active' : '') + (isDeleted ? ' deleted' : '');
-      item.dataset.id = conv.id;
-
-      const title = document.createElement('span');
-      title.className = 'title';
-      title.textContent = conv.title;
-      item.appendChild(title);
-
-      if (isDeleted) {
-        const restore = document.createElement('button');
-        restore.className = 'del';
-        restore.type = 'button';
-        restore.textContent = '↺';
-        restore.title = '대화 복구';
-        restore.addEventListener('click', async (e) => {
-          e.stopPropagation();
-          await fetch('/api/conversations/' + conv.id + '/restore', { method: 'POST' });
-          loadConversations();
-        });
-        item.appendChild(restore);
-
-        const purge = document.createElement('button');
-        purge.className = 'del';
-        purge.type = 'button';
-        purge.textContent = '🗑';
-        purge.title = '완전 삭제 (복구 불가)';
-        purge.addEventListener('click', async (e) => {
-          e.stopPropagation();
-          if (!confirm('이 대화를 완전히 삭제할까요? 복구할 수 없습니다.')) return;
-          await fetch('/api/conversations/' + conv.id + '/purge', { method: 'DELETE' });
-          if (conv.id === currentConversationId) startNewChat();
-          loadConversations();
-        });
-        item.appendChild(purge);
-      } else {
-        const del = document.createElement('button');
-        del.className = 'del';
-        del.type = 'button';
-        del.textContent = '✕';
-        del.title = '대화 삭제';
-        del.addEventListener('click', async (e) => {
-          e.stopPropagation();
-          await fetch('/api/conversations/' + conv.id, { method: 'DELETE' });
-          if (conv.id === currentConversationId) startNewChat();
-          loadConversations();
-        });
-        item.appendChild(del);
-      }
-
-      item.addEventListener('click', () => selectConversation(conv.id));
-      convListEl.appendChild(item);
-    });
-  }
-
-  async function selectConversation(id) {
-    if (id === currentConversationId) return;
+  async function selectConversation(id, focusRunId, force) {
+    if (busy) return;
+    if (id === currentConversationId && !focusRunId && !force) return;
+    stopWatching();
     try {
       const res = await fetch('/api/conversations/' + id);
       if (!res.ok) throw new Error('not found');
       const conv = await res.json();
-
       currentConversationId = conv.id;
+      currentTitle = conv.title;
+      if (currentView() === 'chat') $('topTitle').textContent = currentTitle;
       history = conv.messages.map(m => ({ role: m.role, content: m.content }));
-
       messagesEl.innerHTML = '';
-      started = true;
-      appEl.classList.remove('landing');
+      threadEl.classList.remove('is-landing');
+      clearAttachments();
+      let lastRun = null, focusWrap = null, focusSources = null;
       conv.messages.forEach((m, i) => {
-        const bubble = addMessage(m.role, m.content);
+        const msg = addMessage(m.role, m.content);
         if (m.role === 'assistant') {
           const transcript = conv.messages.slice(0, i + 1).map(x => ({ role: x.role, content: x.content }));
-          appendMessageActions(bubble, m.sources, transcript);
+          appendMessageActions(msg, m.sources, transcript, m.run_id);
+          if (m.run_id) {
+            lastRun = { id: m.run_id, sources: m.sources, wrap: msg.wrap, roleEl: msg.roleEl };
+            if (m.run_id === focusRunId) { focusWrap = msg.wrap; focusSources = m.sources; }
+          }
         }
       });
-
-      [...convListEl.children].forEach(el => {
-        el.classList.toggle('active', el.dataset.id === id);
+      setTopStatus('idle', `메시지 ${conv.messages.length}개`);
+      if (conv.active_run_id) {
+        // 새로고침 등으로 끊겼지만 서버에서는 아직 이 대화의 답을 만드는 중 — 이어서 보여준다
+        watchRun(conv.id, conv.active_run_id);
+        return;
+      }
+      if (focusRunId) {
+        focusMessage(focusWrap);
+        if (focusWrap) focusWrap.scrollIntoView({ block: 'center' });
+        openRun(focusRunId, focusSources);
+      } else if (lastRun) {
+        openRun(lastRun.id, lastRun.sources);
+      } else {
+        wb = null;
+        renderWorkbench();
+      }
+      // 메시지별 모델 표시는 run 기록에 있으므로 비동기로 채운다
+      conv.messages.forEach((m, i) => {
+        if (m.role !== 'assistant' || !m.run_id) return;
+        const roleEl = messagesEl.children[i] && messagesEl.children[i].querySelector('.model-tag');
+        if (!roleEl) return;
+        fetch('/api/runs/' + m.run_id).then(r => r.ok ? r.json() : null).then(run => {
+          if (run && run.adopted_model) roleEl.textContent = '· ' + modelLabel(run.adopted_model) + (run.mode === 'compare' ? ` (${(run.candidates || []).length}개 중 채택)` : '');
+        }).catch(() => {});
       });
     } catch (e) {
       // 대화를 못 찾으면(삭제됨 등) 조용히 무시
     }
   }
 
-  function startNewChat() {
-    currentConversationId = null;
-    history = [];
-    started = false;
-    messagesEl.innerHTML = '';
-    appEl.classList.add('landing');
-    [...convListEl.children].forEach(el => el.classList.remove('active'));
-    input.focus();
+  // ── 진행 중인 답변 이어 보기(새로고침/대화 재진입 대비) ──
+  // 서버는 페이지가 닫혀도 답을 끝까지 만든다. 다시 열었을 때 그 진행 상황을 1.5초마다 받아
+  // 로봇 "작업 중" 표시와 작업대를 갱신하고, 끝나면 대화를 다시 불러 답변을 보여준다.
+  let watching = null; // {conversationId, runId, timer}
+  function stopWatching() {
+    if (watching) clearTimeout(watching.timer);
+    watching = null;
+    sendBtn.disabled = false;
+  }
+  function watchRun(conversationId, runId) {
+    stopWatching();
+    const msg = addMessage('assistant', '', { state: 'working' });
+    msg.bubble.innerHTML = typingHtml('답변 만드는 중');
+    sendBtn.disabled = true;
+    setTopStatus('running', '답변 만드는 중');
+    watching = { conversationId, runId, timer: null };
+    const me = watching;
+    const tick = async () => {
+      if (watching !== me) return;
+      let run = null;
+      try {
+        const res = await fetch('/api/runs/' + runId);
+        if (res.ok) run = await res.json();
+      } catch (e) {}
+      if (watching !== me) return;
+      if (run && run.live) {
+        liveRunId = null;
+        wb = runStateFromRecord(run);
+        renderWorkbench();
+        const running = wb.steps.filter(s => s.status === 'running').pop();
+        msg.bubble.innerHTML = typingHtml((running ? running.label : '답변 만드는 중') + ' 중', '새로고침 전에 보낸 질문을 이어서 처리하고 있습니다');
+        if (running) setTopStatus('running', running.label);
+        me.timer = setTimeout(tick, 1500);
+        return;
+      }
+      stopWatching();
+      selectConversation(conversationId, runId, true);
+      loadConversations();
+      refreshRunCount();
+    };
+    tick();
   }
 
-  newChatBtn.addEventListener('click', startNewChat);
-  sidebarCollapseBtn.addEventListener('click', () => {
-    sidebarEl.classList.add('collapsed');
-    appEl.classList.add('sidebar-collapsed');
-  });
-  sidebarOpenBtn.addEventListener('click', () => {
-    sidebarEl.classList.remove('collapsed');
-    appEl.classList.remove('sidebar-collapsed');
-  });
-
+  function startNewChat() {
+    if (busy) return;
+    stopWatching();
+    currentConversationId = null;
+    currentTitle = '';
+    history = [];
+    messagesEl.innerHTML = '';
+    threadEl.classList.add('is-landing');
+    $('topTitle').textContent = '새 작업';
+    setTopStatus('idle', '대기');
+    clearAttachments();
+    wb = null;
+    renderWorkbench();
+    location.hash = '#/chat';
+    input.focus();
+  }
+  $('newChatBtn').addEventListener('click', startNewChat);
   loadConversations();
+
+  // ───────────────────────── 파일 첨부 ─────────────────────────
+  let attachments = []; // {id, filename, text_chars} — 이 대화에서 보내는 질문마다 함께 전달
+  function clearAttachments() { attachments = []; renderAttachments(); }
+  function renderAttachments(uploadingNames) {
+    const box = $('attachments');
+    box.innerHTML = '';
+    attachments.forEach(f => {
+      const chip = document.createElement('span');
+      chip.className = 'attach-chip';
+      chip.innerHTML = `${icon('file')}<span class="name"></span><small></small><button type="button" aria-label="첨부 취소">✕</button>`;
+      chip.querySelector('.name').textContent = f.filename;
+      chip.querySelector('small').textContent = f.text_chars ? f.text_chars.toLocaleString() + '자' : '텍스트 없음';
+      chip.querySelector('button').addEventListener('click', () => { attachments = attachments.filter(a => a.id !== f.id); renderAttachments(); });
+      box.appendChild(chip);
+    });
+    (uploadingNames || []).forEach(name => {
+      const chip = document.createElement('span');
+      chip.className = 'attach-chip uploading';
+      chip.innerHTML = `<span class="typing"><span class="ring"></span></span><span class="name"></span>`;
+      chip.querySelector('.name').textContent = name + ' 올리는 중';
+      box.appendChild(chip);
+    });
+  }
+  async function uploadFiles(fileList) {
+    const files = [...fileList];
+    if (!files.length) return { files: [], errors: [] };
+    const fd = new FormData();
+    files.forEach(f => fd.append('file', f));
+    const res = await fetch('/api/files', { method: 'POST', body: fd });
+    let data = {};
+    try { data = await res.json(); } catch (e) { data = { error: res.status === 413 ? '파일이 너무 큽니다.' : '업로드 실패' }; }
+    return { files: data.files || [], errors: data.errors && data.errors.length ? data.errors : (data.error ? [data.error] : []) };
+  }
+  async function attachLocalFiles(fileList) {
+    const names = [...fileList].map(f => f.name);
+    renderAttachments(names);
+    const { files, errors } = await uploadFiles(fileList);
+    files.forEach(f => attachments.push(f));
+    renderAttachments();
+    if (errors.length) alert(errors.join('\n'));
+    refreshFileCount();
+  }
+  $('attachBtn').addEventListener('click', () => $('fileInput').click());
+  $('fileInput').addEventListener('change', (e) => { attachLocalFiles(e.target.files); e.target.value = ''; });
+  ['dragenter', 'dragover'].forEach(t => threadEl.addEventListener(t, (e) => { if ([...e.dataTransfer.types].includes('Files')) { e.preventDefault(); threadEl.classList.add('drag-over'); } }));
+  ['dragleave', 'drop'].forEach(t => threadEl.addEventListener(t, (e) => { if (t === 'dragleave' && threadEl.contains(e.relatedTarget)) return; threadEl.classList.remove('drag-over'); }));
+  threadEl.addEventListener('drop', (e) => { e.preventDefault(); if (e.dataTransfer.files.length) attachLocalFiles(e.dataTransfer.files); });
+
+  // ───────────────────────── 질문 보내기(스트리밍) ─────────────────────────
+  async function streamChat(payload, onEvent) {
+    const res = await fetch('/api/chat/stream', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    });
+    if (!res.ok || !res.body) {
+      let msg = '요청 실패 (' + res.status + ')';
+      try { const d = await res.json(); if (d.error) msg = d.error; } catch (e) {}
+      throw new Error(msg);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let final = null;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        const ev = JSON.parse(line);
+        onEvent(ev);
+        if (ev.type === 'final') final = ev;
+        if (ev.type === 'error' && ev.fatal) throw new Error(ev.error);
+      }
+    }
+    if (!final) throw new Error('응답이 중간에 끊겼습니다. 실행 기록에서 결과를 확인해주세요.');
+    return final;
+  }
+
+  function typingHtml(label, sub) {
+    return `<span class="agent-composing"><span class="amicro-typing"><i></i><i></i><i></i></span><span class="amicro-text-shimmer">${escapeHtml(label)}</span>${sub ? `<small>${escapeHtml(sub)}</small>` : ''}</span>`;
+  }
+
+  async function runTurn(msg, payload, question) {
+    const onEvent = (ev) => {
+      if (ev.type === 'start') {
+        liveRunId = ev.run_id;
+        wb = newRunState({ run_id: ev.run_id, question, mode: ev.mode, candidates: ev.candidates });
+        if (ev.conversation_id) currentConversationId = ev.conversation_id;
+      } else {
+        applyEvent(wb, ev);
+      }
+      renderWorkbench();
+      const running = wb.steps.filter(s => s.status === 'running').pop();
+      if (running && wb.status === 'running') {
+        const cands = wb.candOrder.length > 1 ? `모델 ${wb.candOrder.filter(m => wb.candidates[m].status === 'done').length}/${wb.candOrder.length}` : '';
+        msg.bubble.innerHTML = typingHtml(running.label + ' 중', cands);
+        setTopStatus('running', running.label);
+      }
+    };
+    return streamChat(payload, onEvent);
+  }
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const text = input.value.trim();
-    if (!text) return;
-
-    if (!started) {
-      started = true;
-      appEl.classList.remove('landing');
-    }
-
+    if (!text || busy) return;
+    if (watching) { setTopStatus('running', '이전 질문의 답변을 만드는 중입니다'); return; }
+    busy = true;
+    threadEl.classList.remove('is-landing');
     input.value = '';
     input.style.height = 'auto';
     sendBtn.disabled = true;
+    if (!currentConversationId) { currentTitle = text.length > 40 ? text.slice(0, 40) + '…' : text; $('topTitle').textContent = currentTitle; }
 
     addMessage('user', text);
     history.push({ role: 'user', content: text });
+    const msg = addMessage('assistant', '', { state: 'working' });
+    msg.bubble.innerHTML = typingHtml('요청 보내는 중');
+    focusMessage(msg.wrap);
+    setTopStatus('running', '답변 만드는 중');
 
-    const bubble = addMessage('assistant', '');
-    const statusMessages = ['위키 검색 중', '관련 문서 분석 중', 'AI 답변 생성 중', '거의 다 됐어요, 조금만 더 기다려주세요'];
-    let statusIdx = 0;
-    bubble.innerHTML = '<span class="typing"><span class="typing-label">' + statusMessages[0]
-      + '</span><span class="dots"><span></span><span></span><span></span></span></span>';
-    const typingLabel = bubble.querySelector('.typing-label');
-    // claude -p CLI는 최대 180초까지 걸릴 수 있어(백엔드 subprocess timeout), 같은 문구가
-    // 오래 떠 있으면 멈춘 것처럼 보인다 — 점 애니메이션과 별개로 문구도 주기적으로 바꿔준다.
-    const statusTimer = setInterval(() => {
-      if (!typingLabel.isConnected) { clearInterval(statusTimer); return; }
-      statusIdx = (statusIdx + 1) % statusMessages.length;
-      typingLabel.textContent = statusMessages[statusIdx];
-    }, 12000);
-
-    async function askChat(model, retry) {
-      const res = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ history, model, conversation_id: currentConversationId, retry: !!retry }),
-      });
-      return res.json();
-    }
-
+    const useCompare = compareOn && compareCandidates().length >= 2;
+    let usedModel = modelSelect.value || undefined;
+    const basePayload = {
+      history, model: usedModel, conversation_id: currentConversationId,
+      compare: useCompare, candidates: useCompare ? compareCandidates() : undefined,
+      file_ids: attachments.map(f => f.id),
+    };
     try {
-      let usedModel = modelSelect.value || undefined;
-      let data = await askChat(usedModel, false);
-      if (data.error) {
-        bubble.textContent = '오류: ' + data.error;
-      } else {
-        if (data.conversation_id) currentConversationId = data.conversation_id;
-        let hadError = await renderMessage(bubble, data.answer);
+      let data = await runTurn(msg, Object.assign({}, basePayload, { retry: false }), text);
+      currentConversationId = data.conversation_id;
+      usedModel = data.adopted_model || usedModel;
+      msg.roleEl.querySelector('.model-tag').textContent = '· ' + modelLabel(usedModel) + (data.verdict ? ` (${data.candidates.length}개 중 채택)` : '');
+      setRobot(msg, 'ready');
+      let hadError = await typeOut(msg.bubble, data.answer);
 
-        const escalated = pickEscalationModel(usedModel);
-        if (hadError && escalated) {
-          const note = document.createElement('div');
-          note.className = 'mermaid-error-note';
-          note.textContent = `⏳ 다이어그램 문법 오류 감지 — ${escalated}로 다시 생성 중...`;
-          bubble.appendChild(note);
-          messagesEl.scrollTop = messagesEl.scrollHeight;
-
-          data = await askChat(escalated, true);
-          if (!data.error) {
-            usedModel = escalated;
-            hadError = await renderMessage(bubble, data.answer);
-          }
+      const escalated = pickEscalationModel(usedModel);
+      if (hadError && escalated && !useCompare) {
+        const note = document.createElement('div');
+        note.className = 'mermaid-error-note';
+        note.textContent = `⏳ 다이어그램 문법 오류 감지 — ${modelLabel(escalated)}로 다시 생성 중...`;
+        msg.bubble.appendChild(note);
+        const retried = await runTurn(msg, Object.assign({}, basePayload, { retry: true, model: escalated, conversation_id: currentConversationId }), text).catch(() => null);
+        if (retried) {
+          data = retried;
+          usedModel = escalated;
+          msg.roleEl.querySelector('.model-tag').textContent = '· ' + modelLabel(usedModel);
+          hadError = await renderMessage(msg.bubble, data.answer);
         }
-
-        appendMessageActions(bubble, data.sources, [...history, { role: 'assistant', content: data.answer }]);
-        history.push({ role: 'assistant', content: data.answer });
-        loadConversations();
       }
+      appendMessageActions(msg, data.sources, [...history, { role: 'assistant', content: data.answer }], data.run_id);
+      history.push({ role: 'assistant', content: data.answer });
+      setTopStatus('done', '답변 완료');
+      loadConversations();
+      refreshRunCount();
     } catch (err) {
-      bubble.textContent = '서버 연결 오류: ' + err.message;
+      msg.bubble.textContent = '오류: ' + err.message;
+      setRobot(msg, 'attention');
+      if (wb) { wb.status = 'error'; wb.error = wb.error || err.message; renderWorkbench(); }
+      setTopStatus('error', '오류');
+      history.pop();
     } finally {
-      clearInterval(statusTimer);
+      liveRunId = null;
+      busy = false;
       sendBtn.disabled = false;
       messagesEl.scrollTop = messagesEl.scrollHeight;
     }
   });
-
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      form.requestSubmit();
-    }
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); form.requestSubmit(); }
   });
-  input.addEventListener('input', () => {
-    input.style.height = 'auto';
-    input.style.height = input.scrollHeight + 'px';
+  input.addEventListener('input', () => { input.style.height = 'auto'; input.style.height = input.scrollHeight + 'px'; });
+  $('promptExamples').querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+    input.value = b.lastChild.textContent.trim();
+    input.focus();
+    input.dispatchEvent(new Event('input'));
+  }));
+
+  // ───────────────────────── 실행 기록 화면(작업 단위) ─────────────────────────
+  // 작업 = 대화 하나("새 작업"을 누른 뒤 이어 물은 질문 전부). 예전엔 질문 1건마다 한 줄이라 목록이
+  // 금방 길어져서(2026-10-07 사용자 지적) expharness처럼 작업 단위로 묶었다. 질문별로 펼쳐 보는 기능은
+  // 참조 사이트처럼 없앴고(사용자 요청), 작업을 누르면 그 작업의 대화 전문을 읽기 전용으로 보여준다.
+  let allRuns = [];
+  let allTasks = [];
+  let recordFilter = 'all';
+  let taskQuery = '';
+  async function refreshRunCount() {
+    try {
+      const [convRes, runRes] = await Promise.all([fetch('/api/conversations'), fetch('/api/runs?limit=500')]);
+      const convs = (await convRes.json()).conversations || [];
+      allRuns = (await runRes.json()).runs || [];
+      const byConv = {};
+      allRuns.forEach(r => { (byConv[r.conversation_id] = byConv[r.conversation_id] || []).push(r); });
+      allTasks = convs.map(c => {
+        const runs = (byConv[c.id] || []).slice().sort((x, y) => x.created_at < y.created_at ? -1 : 1);
+        const last = runs[runs.length - 1];
+        return Object.assign({}, c, {
+          runs, last,
+          compare: runs.filter(r => r.mode === 'compare').length,
+          errors: runs.filter(r => r.status === 'error').length,
+          running: runs.some(r => r.status === 'running'),
+          totalMs: runs.reduce((a, r) => a + (r.duration_ms || 0), 0),
+        });
+      });
+      $('navRunCount').textContent = allTasks.length || '';
+    } catch (e) {}
+  }
+  async function loadRecords() {
+    if (!allTasks.length) $('taskRows').innerHTML = '<div class="projects-page-empty">불러오는 중…</div>';
+    await refreshRunCount();
+    renderRecords();
+  }
+  $('recordsNewBtn').addEventListener('click', startNewChat);
+  $('taskSearch').addEventListener('input', () => { taskQuery = $('taskSearch').value; renderRecords(); });
+  $('taskRefresh').addEventListener('click', async () => {
+    $('taskRefresh').classList.add('is-spinning');
+    await loadRecords();
+    $('taskRefresh').classList.remove('is-spinning');
   });
 
+  function runStatusHtml(status) {
+    return status === 'done' ? '<span class="product-status status-done"><i></i>답변 완료</span>'
+      : status === 'error' ? '<span class="product-status status-error"><i></i>오류</span>'
+      : '<span class="product-status status-running"><i></i>만드는 중</span>';
+  }
+
+  function renderRecords() {
+    const tasks = allTasks;
+    const runs = allRuns;
+    const compareRuns = runs.filter(r => r.mode === 'compare' && r.status === 'done');
+    const avg = runs.length ? Math.round(runs.reduce((a, r) => a + (r.duration_ms || 0), 0) / runs.length) : 0;
+    const wins = {};
+    compareRuns.forEach(r => { if (r.adopted_model) wins[r.adopted_model] = (wins[r.adopted_model] || 0) + 1; });
+    const winRows = Object.entries(wins).sort((a, b) => b[1] - a[1]);
+    const maxWin = winRows.length ? winRows[0][1] : 1;
+    $('recordKpis').innerHTML = `
+      <div class="kpi"><span>작업</span><strong>${tasks.length}</strong><small>질문 ${runs.length}개</small></div>
+      <div class="kpi"><span>답변 평균 소요</span><strong>${fmtMs(avg) || '—'}</strong><small>검색부터 저장까지</small></div>
+      <div class="kpi"><span>모델 비교</span><strong>${compareRuns.length}</strong><small>여러 모델 중 하나를 채택한 질문</small></div>
+      <div class="kpi"><span>모델별 채택</span>${winRows.length ? `<div class="adopt-bars">${winRows.map(([m, n]) => `<div><span>${escapeHtml(modelLabel(m))}</span><i style="width:${Math.round(n / maxWin * 100)}%"></i><b>${n}</b></div>`).join('')}</div>` : '<small style="display:block;margin-top:8px">아직 비교한 질문이 없습니다</small>'}</div>`;
+
+    const FILTERS = [
+      ['all', '전체', () => true],
+      ['compare', '모델 비교', t => t.compare > 0],
+      ['error', '오류', t => t.errors > 0],
+    ];
+    $('recordTabs').innerHTML = FILTERS.map(([k, l, fn]) => `<button type="button" data-k="${k}" class="${recordFilter === k ? 'is-active' : ''}" aria-pressed="${recordFilter === k}">${l}<small>${tasks.filter(fn).length}</small></button>`).join('');
+    $('recordTabs').querySelectorAll('button').forEach(b => b.addEventListener('click', () => { recordFilter = b.dataset.k; renderRecords(); }));
+
+    const fn = FILTERS.find(f => f[0] === recordFilter)[2];
+    const q = taskQuery.trim().toLowerCase();
+    const list = tasks.filter(fn).filter(t => !q || (t.title + ' ' + t.runs.map(r => r.question).join(' ')).toLowerCase().includes(q));
+    const rowsEl = $('taskRows');
+    if (!list.length) {
+      rowsEl.innerHTML = `<div class="projects-page-empty"><strong>${tasks.length ? '조건에 맞는 작업이 없습니다' : '아직 작업이 없습니다'}</strong><p>${tasks.length ? '검색어나 필터를 바꿔보세요.' : '“새 작업”을 누르고 질문하면 여기에 쌓입니다.'}</p></div>`;
+      return;
+    }
+    rowsEl.innerHTML = '';
+    list.forEach(t => {
+      const wrap = document.createElement('div');
+      wrap.className = 'task-wrap' + (t.id === currentConversationId ? ' is-current' : '');
+      const status = t.running ? runStatusHtml('running') : t.errors ? runStatusHtml('error') : t.runs.length ? runStatusHtml('done') : '<span class="product-status status-idle"><i></i>기록 없음</span>';
+      const bits = [`질문 ${t.runs.length || 0}개`];
+      if (t.last && t.last.adopted_model) bits.push('최근 ' + modelLabel(t.last.adopted_model));
+      if (t.compare) bits.push(`모델 비교 ${t.compare}`);
+      if (t.totalMs) bits.push('누적 ' + fmtMs(t.totalMs));
+      wrap.innerHTML = `<div class="dir-row">
+          <span class="project-mark"></span>
+          <div class="dir-copy"><strong></strong><small></small></div>
+          <div class="dir-state">${status}<small>${fmtTime(t.updated_at)}</small></div>
+          <div class="dir-side">
+            <button type="button" class="project-row-delete" title="작업 삭제" aria-label="작업 삭제"><svg class="i"><use href="#i-trash"/></svg></button>
+          </div></div>`;
+      wrap.querySelector('.project-mark').textContent = (t.title || '?').trim().slice(0, 1).toUpperCase();
+      wrap.querySelector('.dir-copy strong').textContent = t.title;
+      wrap.querySelector('.dir-copy small').textContent = bits.join(' · ');
+
+      wrap.querySelector('.project-row-delete').addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const n = t.runs.length;
+        if (!confirm(`'${t.title}' 작업을 삭제할까요?${n > 1 ? ` 이 작업의 질문 ${n}개가 함께 지워집니다.` : ''}`)) return;
+        const res = await fetch('/api/conversations/' + t.id, { method: 'DELETE' });
+        if (!res.ok) { alert('삭제하지 못했습니다.'); return; }
+        if (t.id === currentConversationId) { startNewChat(); location.hash = '#/records'; }
+        await loadRecords();
+      });
+      wrap.querySelector('.dir-row').addEventListener('click', () => { location.hash = '#/records/' + t.id; });
+      rowsEl.appendChild(wrap);
+    });
+  }
+
+  // 작업 상세(읽기 전용) — 채팅 화면으로 넘어가지 않고, 이 작업에서 주고받은 대화 전문을 그대로 보여준다.
+  async function renderTaskDetail(id, focusRunId) {
+    const box = $('taskDetail');
+    box.innerHTML = '<div class="projects-page-empty">불러오는 중…</div>';
+    let conv;
+    try {
+      const res = await fetch('/api/conversations/' + id);
+      if (!res.ok) throw new Error();
+      conv = await res.json();
+      if (!allRuns.length) await refreshRunCount();
+    } catch (e) {
+      box.innerHTML = '<div class="projects-page-empty"><strong>작업을 찾을 수 없습니다</strong><p><a class="back-link" href="#/records">← 실행 기록</a></p></div>';
+      return;
+    }
+    $('topTitle').textContent = conv.title;
+    if (!busy && !watching) setTopStatus('idle', '읽기 전용');
+    const runs = allRuns.filter(r => r.conversation_id === id);
+    const runById = {};
+    runs.forEach(r => { runById[r.id] = r; });
+    const questions = conv.messages.filter(m => m.role === 'user').length;
+    const totalMs = runs.reduce((a, r) => a + (r.duration_ms || 0), 0);
+    box.innerHTML = `<div class="task-detail">
+      <a class="back-link" href="#/records"><svg class="i"><use href="#i-back"/></svg> 실행 기록</a>
+      <header class="history-head">
+        <div class="page-overline">실행 기록</div>
+        <h1></h1>
+        <div class="history-meta">
+          <span>시작 <b>${fmtTime(conv.created_at)}</b></span><span>최근 <b>${fmtTime(conv.updated_at)}</b></span>
+          <span>질문 <b>${questions}</b></span>${totalMs ? `<span>누적 처리 <b>${fmtMs(totalMs)}</b></span>` : ''}
+        </div>
+        <div class="history-actions"><button type="button" class="btn" id="taskContinue">이 작업 이어서 대화하기</button></div>
+      </header>
+      <div class="history-thread" id="taskThread"></div></div>`;
+    box.querySelector('h1').textContent = conv.title;
+    $('taskContinue').addEventListener('click', () => {
+      location.hash = '#/chat';
+      currentConversationId = null;
+      selectConversation(id);
+    });
+    const thread = $('taskThread');
+    let focusEl = null;
+    conv.messages.forEach(m => {
+      const wrap = document.createElement('div');
+      wrap.className = 'msg ' + m.role;
+      const role = document.createElement('div');
+      role.className = 'message-role';
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      renderMessage(bubble, m.content);
+      if (m.role === 'assistant') {
+        const run = m.run_id && runById[m.run_id];
+        role.innerHTML = '<span>위키봇</span><span class="model-tag"></span>';
+        if (run) {
+          role.querySelector('.model-tag').textContent = '· ' + [
+            modelLabel(run.adopted_model) + (run.mode === 'compare' ? ` (${(run.candidates || []).length}개 중 채택)` : ''),
+            fmtTime(run.created_at), fmtMs(run.duration_ms),
+          ].filter(Boolean).join(' · ');
+        }
+        if (m.sources && m.sources.length) {
+          const src = document.createElement('div');
+          src.className = 'msg-actions';
+          m.sources.forEach(x => {
+            const el = document.createElement(x.url ? 'a' : 'span');
+            el.className = 'chip-btn';
+            if (x.url) { el.href = x.url; el.target = '_blank'; el.rel = 'noopener noreferrer'; }
+            el.textContent = x.label;
+            src.appendChild(el);
+          });
+          bubble.appendChild(src);
+        }
+        wrap.insertAdjacentHTML('beforeend', robotHtml('ready'));
+        const content = document.createElement('div');
+        content.className = 'message-content';
+        content.appendChild(role);
+        content.appendChild(bubble);
+        wrap.appendChild(content);
+        if (focusRunId && m.run_id === focusRunId) focusEl = wrap;
+      } else {
+        role.textContent = '나';
+        wrap.appendChild(role);
+        wrap.appendChild(bubble);
+        if (focusRunId && m.run_id === focusRunId) focusEl = focusEl || wrap;
+      }
+      thread.appendChild(wrap);
+    });
+    const page = $('view-records');
+    if (focusEl) {
+      focusEl.classList.add('is-focused');
+      focusEl.scrollIntoView({ block: 'start' });
+      page.scrollTop -= 16;
+    } else page.scrollTop = 0;
+  }
+
+  // ───────────────────────── 파일 화면 ─────────────────────────
+  let allFiles = [];
+  async function refreshFileCount() {
+    try {
+      allFiles = (await (await fetch('/api/files')).json()).files || [];
+      $('navFileCount').textContent = allFiles.length || '';
+    } catch (e) {}
+  }
+  async function loadFiles() {
+    await refreshFileCount();
+    renderFiles();
+  }
+  function renderFiles() {
+    if (!allFiles.length) {
+      $('fileTable').innerHTML = '<tbody><tr><td class="empty-state">아직 올린 파일이 없습니다.</td></tr></tbody>';
+      return;
+    }
+    let html = `<thead><tr><th>파일</th><th class="hide-sm">형식</th><th class="num">크기</th><th class="num hide-sm">추출 텍스트</th><th class="hide-sm">올린 시각</th><th></th></tr></thead><tbody>`;
+    allFiles.forEach(f => {
+      const attached = attachments.some(a => a.id === f.id);
+      html += `<tr data-id="${f.id}" style="cursor:default">
+        <td><div class="q">${escapeHtml(f.filename)}</div></td>
+        <td class="hide-sm"><small style="margin:0">${escapeHtml(f.kind || '')}</small></td>
+        <td class="num nowrap">${fmtBytes(f.size)}</td>
+        <td class="num hide-sm nowrap">${f.text_chars ? f.text_chars.toLocaleString() + '자' : '<small style="margin:0">없음</small>'}</td>
+        <td class="hide-sm nowrap"><small style="margin:0">${fmtTime(f.created_at)}</small></td>
+        <td><div class="row-actions">
+          <button type="button" data-act="attach">${attached ? '첨부됨' : '대화에 첨부'}</button>
+          <button type="button" data-act="preview">미리보기</button>
+          <button type="button" data-act="download">받기</button>
+          <button type="button" data-act="delete" class="danger">삭제</button>
+        </div></td></tr>`;
+    });
+    $('fileTable').innerHTML = html + '</tbody>';
+    $('fileTable').querySelectorAll('tr[data-id]').forEach(tr => {
+      const f = allFiles.find(x => x.id === tr.dataset.id);
+      tr.querySelectorAll('button[data-act]').forEach(b => b.addEventListener('click', async () => {
+        const act = b.dataset.act;
+        if (act === 'attach') {
+          if (!attachments.some(a => a.id === f.id)) attachments.push(f);
+          renderAttachments();
+          location.hash = '#/chat';
+          input.focus();
+        } else if (act === 'preview') {
+          const d = await (await fetch('/api/files/' + f.id)).json();
+          $('viewerTitle').textContent = f.filename;
+          $('viewerBody').innerHTML = `<p class="modal-sub" style="margin-top:0">추출 텍스트 ${(d.text_chars || 0).toLocaleString()}자 중 앞부분 · 답변에는 파일당 최대 24,000자가 들어갑니다</p><pre class="preview-text"></pre>`;
+          $('viewerBody').querySelector('pre').textContent = d.preview || '(추출된 텍스트가 없습니다)';
+          $('viewerOverlay').classList.remove('hidden');
+        } else if (act === 'download') {
+          location.href = '/api/files/' + f.id + '/download';
+        } else if (act === 'delete') {
+          if (!confirm(`'${f.filename}' 파일을 삭제할까요?`)) return;
+          await fetch('/api/files/' + f.id, { method: 'DELETE' });
+          attachments = attachments.filter(a => a.id !== f.id);
+          renderAttachments();
+          loadFiles();
+        }
+      }));
+    });
+  }
+  const dropzone = $('dropzone');
+  const pagePicker = document.createElement('input');
+  pagePicker.type = 'file';
+  pagePicker.multiple = true;
+  async function uploadFromPage(fileList) {
+    const st = $('uploadStatus');
+    st.className = 'upload-status';
+    st.textContent = `${fileList.length}개 올리는 중…`;
+    const { files, errors } = await uploadFiles(fileList);
+    st.className = 'upload-status' + (errors.length ? ' err' : '');
+    st.textContent = [files.length ? `${files.length}개 올림` : '', ...errors].filter(Boolean).join(' · ');
+    loadFiles();
+  }
+  dropzone.addEventListener('click', () => pagePicker.click());
+  pagePicker.addEventListener('change', () => { if (pagePicker.files.length) uploadFromPage(pagePicker.files); pagePicker.value = ''; });
+  ['dragenter', 'dragover'].forEach(t => dropzone.addEventListener(t, (e) => { e.preventDefault(); dropzone.classList.add('drag-over'); }));
+  ['dragleave', 'drop'].forEach(t => dropzone.addEventListener(t, () => dropzone.classList.remove('drag-over')));
+  dropzone.addEventListener('drop', (e) => { e.preventDefault(); if (e.dataTransfer.files.length) uploadFromPage(e.dataTransfer.files); });
+
+  refreshRunCount();
+  refreshFileCount();
+  showView();
   input.focus();
 </script>
+</body>
+</html>

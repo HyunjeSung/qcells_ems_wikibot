@@ -1,9 +1,12 @@
 # Qcells EMS 위키봇
 
-Confluence 라이브 검색(Atlassian Rovo Search 우선, CQL 폴백)을 배경지식으로 답하는
-ChatGPT 스타일 웹 챗봇. 사이드바에서 과거 대화 기록을 열람할 수 있다.
+Confluence 라이브 검색(Atlassian Rovo Search 우선, CQL 폴백)과 Jira를 배경지식으로 답하는 웹 챗봇.
+v2.0.0부터 화면을 [expharness](https://ml.bridge.infoedu.co.kr/project/build)의 작업대 구성으로
+바꿨다 — 가운데 대화, 오른쪽 "작업대"에 답변이 만들어지는 단계(검색 → 보강 → 생성 → 채점·채택)를
+실시간으로 보여주고, 모든 질문을 실행 기록으로 남긴다. 여러 모델로 답하게 한 뒤 블라인드 채점으로
+더 나은 답을 채택하는 "모델 비교" 모드와 파일 첨부도 지원한다.
 
-현재 버전: **v1.2.2** — 버전별 변경 내역은
+현재 버전: **v2.0.0** — 버전별 변경 내역은
 [GitHub Releases](https://github.com/HyunjeSung/qcells_ems_wikibot/releases) 참고.
 
 ## 구성
@@ -14,7 +17,16 @@ ChatGPT 스타일 웹 챗봇. 사이드바에서 과거 대화 기록을 열람�
   Rovo Search뿐 아니라 Confluence 작성자(author) 메타데이터 기반 검색(`find_author_id_by_title`/
   `search_by_creator`)과 그 결과를 재사용하는 학습 캐시(`_person_alias_cache`)도 여기 있다 —
   아래 "인물 질문 보강" 절 참고.
-- `wiki_chat_history.py` — SQLite 기반 대화 기록 저장(`conversations`/`messages`).
+- `wiki_chat_history.py` — SQLite 저장소(`conversations`/`messages`/`users`, v2.0.0부터 실행 기록
+  `runs`와 업로드 파일 `files`). 실행 기록·메시지는 소프트 삭제(`deleted_at`)라 관리자 화면에는 남는다.
+- `run_trace.py` — 답변 파이프라인 단계 이벤트 수집. `/api/chat/stream`이 NDJSON으로 흘려보내 작업대가
+  실시간 갱신되고, 끝나면 `runs`에 통째로 저장돼 실행 기록에서 그대로 재생된다.
+- `model_arena.py` — 모델 비교 모드. 후보 모델 병렬 생성 → 블라인드 LLM 심사 70% + 규칙 점수 30% →
+  기본 모델을 바꾸려면 `ADOPT_MARGIN`(3점) 이상 앞서야 채택.
+- `file_store.py` — 업로드 파일 저장/텍스트 추출(텍스트·코드·CSV·xlsx·docx·pptx·pdf). 대화에 첨부하면
+  추출 텍스트가 참고 자료 맨 앞에 붙는다.
+- `jira_client.py` — Jira 조회(인물 계정 매칭, 담당 이슈 검색). "티켓" 질문은 Rovo 문서 검색을 건너뛰고
+  Jira를 직접 조회한다(한 사람: 진행 중 담당 이슈, 팀 전체: 명단 인원별 진행 중 할당 수).
 - `confluence_to_text.py` — Confluence storage format(XHTML) → 텍스트 변환.
 - `search_query_utils.py` — 검색어 정제용 정규식 헬퍼(CQL 폴백 검색용). 인물 이름의 영문 별칭
   하드코딩(`_PERSON_NAME_ALIASES`)은 **로마자 음역 자체가 불규칙한 경우 전용**(예: "김하율" →
@@ -23,7 +35,9 @@ ChatGPT 스타일 웹 챗봇. 사이드바에서 과거 대화 기록을 열람�
   `atlassian_mcp_client.py`의 학습 캐시가 처리한다.
 - `query_expansion.py` — 검색어 정제/확장 프롬프트 엔지니어링 전담 모듈(`claude -p` 기반, 아래
   "검색어 정제·확장" 절 참고).
-- `static/index.html` — 프론트엔드(바닐라 JS, 사이드바 + 마크다운/mermaid 렌더링).
+- `static/index.html` — 사용자 화면(바닐라 JS): 대화 + 작업대, 실행 기록(작업 단위 목록 → 읽기 전용 대화
+  전문), 파일. `static/admin.html` — 관리자 화면(`--admin`, 전체 기록·사용자). 둘이 `static/app.css`
+  (디자인 토큰·공용 컴포넌트)와 `static/markdown.js`(마크다운/mermaid 렌더러·로봇 아바타)를 공유한다.
 
 ## 답변 합성
 
