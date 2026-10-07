@@ -49,6 +49,64 @@ Pro/Max 세션을 재사용하므로 별도 API 과금이 없다. CLI가 없거�
 추가, 직전 대화 맥락을 반영해 모호한 단어를 구체화) — Rovo Chat이 검색 전에 스스로 검색어를
 재구성하는 동작을 모사한 것. 자세한 설계는 아래 "검색어 정제·확장" 절 참고.
 
+### 모델 선택 · 모델 비교 (v2.0.0)
+
+입력창에서 답변 모델을 고른다. 모델 id 접두사로 백엔드가 정해진다 — `claude:sonnet`(기본) /
+`claude:opus` / `claude:haiku`는 `claude -p --model <별칭>`, `ollama:<이름>`은 로컬 Ollama.
+
+**모델 비교**를 켜면(`model_arena.py`) 선택한 모델(기본 모델)과 후보(최대 3개)가 같은 참고 자료로
+병렬로 답하고, 그중 하나를 채택해 내보낸다.
+
+1. 어느 모델 답인지 가린 채(A/B/C 무작위) 심사 모델(`WIKIBOT_JUDGE_MODEL`, 기본 haiku)이
+   근거성·관련성·완결성을 0~10으로 채점 → 0~100점 환산(근거성 50%·관련성 30%·완결성 20%).
+2. 규칙 점수(0~100): 참고 자료에 없는 URL(−15/개), 출처 링크 없음(−15), 자료가 있는데
+   "찾지 못했습니다"(−20), 지나치게 짧음(−30)/김(−10), 닫히지 않은 코드블록(−15).
+3. 최종 = 심사 70% + 규칙 30%. 기본 모델을 바꾸려면 `ADOPT_MARGIN`(3점) 이상 앞서야 한다 —
+   근소차·동점이면 기본 모델 유지(샘플링 운으로 잠깐 이긴 모델로 갈아타지 않기 위함). 심사가
+   실패하면 규칙 점수만으로 판정한다.
+
+후보 답변 원문·점수·심사 의견은 실행 기록(`runs.candidates`)에 남아 작업대에서 비교해 볼 수 있다.
+질문당 claude 호출이 후보 수 + 심사 1회만큼 늘어나므로 기본값은 꺼져 있다.
+
+## 작업대 · 실행 기록 (v2.0.0)
+
+`/api/chat/stream`은 `/api/chat`과 같은 처리를 하되 단계 이벤트를 NDJSON으로 흘려보낸다
+(`run_trace.Tracer`). 화면 오른쪽 작업대가 이걸 받아 단계·소요 시간·찾은 문서·모델 비교표를
+실시간으로 그린다. 처리는 별도 스레드에서 돌아서 브라우저를 닫거나 새로고침해도 끝까지 진행되고,
+다시 열면 진행 중인 실행을 이어서 보여준다(같은 대화에 실행이 진행 중이면 새 질문은 409로 거절).
+
+```mermaid
+flowchart LR
+    Q[질문 접수] --> U[첨부 파일 읽기]
+    U --> E["질문 분석·검색어 확장\n(claude -p)"]
+    E -->|티켓 질문| J["Jira 직접 조회\n(인물: 담당 이슈 / 팀: 명단 인원별 할당 수)"]
+    E -->|그 외| R["Rovo 검색\n원본 → 확장"]
+    R --> P["인물 계정 확인 · 작성자 문서 /\n팀 명단 집계 · 첨부파일 파싱"]
+    J --> C[참고 자료 구성]
+    P --> C
+    C --> G["답변 생성\n(단일 또는 모델 비교)"]
+    G --> S[채점·채택] --> W[저장 → runs]
+```
+
+- 실행 기록 화면은 작업(= "새 작업"으로 시작한 대화) 단위 목록이고, 누르면 그 작업의 대화 전문을
+  읽기 전용으로 보여준다. 삭제는 소프트 삭제(`deleted_at`) — 사용자 화면에서만 사라지고 관리자
+  화면(`--admin`)에는 "삭제됨"으로 남는다. API로는 실행 1건 단위 삭제(`DELETE /api/runs/<id>`)도 된다.
+- 파일(`file_store.py`): 텍스트·로그·CSV·JSON·코드·xlsx·docx·pptx·pdf(pypdf 설치 시), 파일당 20MB.
+  대화에 첨부하면 추출 텍스트(파일당 최대 24,000자)가 참고 자료 맨 앞에 "업로드 파일" 출처로 붙는다.
+
+## Jira 질문
+
+"티켓"이 들어간 질문(또는 jira/지라 + 이슈·할당·assign)은 Rovo 문서 검색을 건너뛰고 Jira를 직접
+조회한다(`jira_client.search_jira_assigned`, JQL `assignee = <accountId> AND statusCategory != Done
+AND status != Cancelled`).
+
+- 특정 인물("심철로된 티켓 알려줘. 우선순위별"): 인물 계정 확인 → 진행 중 담당 이슈를 우선순위·마감일
+  순으로. 이슈 하나하나가 출처 카드가 된다.
+- 팀 전체("EnergySW 파트에서 티켓이 가장 많이 할당된 사람은?"): Confluence "Energy SW 자격 역량 대장"
+  명단 인원별로 진행 중 할당 수를 세고, 사람별 Jira 이슈 목록 링크를 출처로 붙인다. 18명을 한 명씩
+  조회해 3분 이상 걸린다.
+- 아직 없는 것: 해결(Done)한 수 집계, 특정 상태만 집계. 할당 수는 진행 중(완료·취소 제외) 기준이다.
+
 ## 검색어 정제·확장 (프롬프트 엔지니어링)
 
 Rovo Search는 짧고 정확한 키워드에서 관련도가 훨씬 높다(예: 자연어 문장 그대로 넣으면
@@ -61,22 +119,24 @@ Rovo Search는 짧고 정확한 키워드에서 관련도가 훨씬 높다(예: 
 
 ### 전체 파이프라인
 
+(검색어 확장 관점의 흐름. 화면에 보이는 단계 전체는 위 "작업대 · 실행 기록" 절 다이어그램 참고 —
+"티켓" 질문은 Rovo 검색 대신 Jira 조회로 바로 간다.)
+
 ```mermaid
 flowchart LR
     Q["사용자 질문"] --> A["_apply_person_aliases\n(로마자 음역 불규칙 인물명 한정)\nsearch_query_utils.py"]
     A --> B["_expand_search_query\n(claude -p 1회 호출)\nquery_expansion.py"]
     B --> CORE["core\n(문법적 잡음만 제거한 원본 검색어\n= 1차/신뢰 검색어)"]
     B --> KW["keywords\n(동의어·표기 변형 포함\n= 2차/보완 검색어)"]
+    B --> PS["person / wants_person_stats\n(질문이 지목한 인물·순위 질문 여부)"]
     CORE --> M["URL 기준 dedup 병합"]
     KW --> M
     M --> D["rovo_search\n(Atlassian Rovo Search MCP)"]
     D --> E["스페이스 필터 + 순위 조정\natlassian_mcp_client.py"]
-    CORE --> PN["인물 이름 후보 추출\n(한글 2~4자 정규식)"]
-    KW --> PN
-    PN --> AA["인물 질문 보강\n(아래 절 참고)"]
+    PS --> AA["인물 질문 보강 / 팀 명단 집계 / Jira 조회\n(아래 절 참고)"]
     E --> F["build_context\n(참고 자료 텍스트 구성)"]
     AA --> F
-    F --> G["call_claude_cli\n(답변 합성, claude -p --model sonnet)"]
+    F --> G["generate_answer\n(선택한 모델, 또는 모델 비교 후 채택)"]
     G --> H["사용자에게 답변"]
 ```
 
@@ -173,14 +233,47 @@ flowchart LR
 ## 실행
 
 ```bash
-pip install -r requirements.txt
-python3 wiki_chat_server.py --port 8010
+pip install -r requirements.txt   # PDF 업로드 텍스트 추출까지 쓰려면 pypdf도 설치
+cp wikibot.env.example wikibot.env   # 값 채우기(아래)
+set -a; source wikibot.env; set +a
+python3 wiki_chat_server.py --port 8010            # 공용(사용자) 화면
+python3 wiki_chat_server.py --port 18011 --admin   # 관리자 화면(로그인 필요)
 ```
 
-`http://localhost:8010` 접속. Confluence 접근은 `claude mcp login atlassian`으로 미리 OAuth
+`http://localhost:8010` 접속. Confluence/Jira 접근은 `claude mcp login atlassian`으로 미리 OAuth
 로그인이 되어 있어야 한다(Claude Code CLI 필요). 위 로그인 없이 CQL 폴백만 쓰려면
 `.env.confluence`에 `ATLASSIAN_EMAIL`/`ATLASSIAN_API_TOKEN`/`ATLASSIAN_BASE_URL`을 설정한다
 (`.gitignore`에 포함되어 있으니 커밋되지 않는다).
+
+`wikibot.env` 주요 값(전체 설명은 `wikibot.env.example`):
+
+| 변수 | 용도 |
+|---|---|
+| `WIKIBOT_VERSION` | 화면 버전 배지. 릴리스 태그와 맞춰 올린다(비우면 `dev`) |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD_HASH` | 관리자 로그인(`--admin`) |
+| `ADMIN_SECRET_KEY` | 세션 쿠키 서명 키. 비우면 재시작마다 로그인/비로그인 세션이 끊긴다 |
+| `WIKIBOT_COMPARE_MODELS` | 모델 비교 기본 후보(예: `claude:sonnet,claude:haiku`) |
+| `WIKIBOT_JUDGE_MODEL` | 모델 비교 심사 모델(기본 `haiku`) |
+| `GMAIL_ADDRESS` / `GMAIL_APP_PASSWORD` | "수정요청" 피드백 메일 발신 |
+
+공용(8010)과 관리자(18011) 인스턴스는 세션 쿠키 이름이 다르다(`session` / `wikibot_admin_session`) —
+같은 PC에서 관리자 페이지에 로그인·로그아웃해도 공용 화면의 세션이 지워지지 않게 하기 위함
+(v2.0.0에서 수정, 그 전에는 관리자 로그아웃 시 비로그인 대화 목록이 끊겼다).
+
+### Pi 배포
+
+라즈베리 파이(`wikibot-pi`)에서 systemd 서비스 두 개로 돈다 — `qcells-wikibot.service`(8010),
+`qcells-wikibot-admin.service`(18011), 둘 다 `~/qcells_ems_wikibot/venv`와 `wikibot.env` 사용.
+git 없이 파일 복사로 배포한다:
+
+1. Pi에서 DB 백업: `cp -p .wiki_chat_history.db .wiki_chat_history.db.bak-<날짜>`
+2. 앱 코드만 rsync — `.wiki_chat_history.db*`, `wikibot.env`, `venv`, `uploads`,
+   `.confluence_live_images`, `.git`은 제외
+3. 진행 중인 답변이 없을 때(`runs.status = 'running'` 없음) 두 서비스 재시작 — 재시작하면 진행 중인
+   답변이 끊긴다. 화면 파일(`static/`)만 바뀌었으면 재시작 없이 새로고침으로 반영된다.
+4. DB 스키마 변경은 서버 시작 시 `wiki_chat_history.init_db()`가 자동으로 적용한다(추가 전용).
+
+접속 장애 복구는 `scripts/recover_wikibot_pi.sh` 참고.
 
 ## Claude Code 슬래시 커맨드 (`/wikibot-api`)
 
@@ -219,7 +312,8 @@ Claude Code 세션에서:
 
 ## 참고
 
-- 답변 소스는 라이브 Confluence 페이지로 한정되어 있다(이 리포에는 위키 문서 자체가 포함돼
-  있지 않다 — 회사별로 Confluence 스페이스 키만 `wiki_chat_server.py`의 `CONFLUENCE_SPACES`에
-  맞게 바꿔서 쓰면 된다).
-- 개발 서버(Flask dev server)이며 인증이 없다. 신뢰할 수 있는 네트워크 안에서만 노출할 것.
+- 답변 소스는 라이브 Confluence 페이지, Jira 이슈, 사용자가 첨부한 파일이다(이 리포에는 위키 문서
+  자체가 포함돼 있지 않다 — 회사별로 Confluence 스페이스 키만 `wiki_chat_server.py`의
+  `CONFLUENCE_SPACES`에 맞게 바꿔서 쓰면 된다).
+- 개발 서버(Flask dev server)다. 개인 계정 로그인과 관리자 로그인이 있지만 비밀번호가 평문 저장되는 등
+  사내 LAN 전용을 전제로 한 구조이므로, 신뢰할 수 있는 네트워크 안에서만 노출할 것.

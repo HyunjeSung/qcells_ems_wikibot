@@ -2,3 +2,5 @@ flask
 beautifulsoup4
 # optional: only needed if ANTHROPIC_API_KEY fallback path is used instead of the `claude` CLI
 anthropic
+# optional: PDF 업로드 텍스트 추출(file_store.py). 없으면 PDF는 저장만 되고 본문은 비어 있다
+pypdf
