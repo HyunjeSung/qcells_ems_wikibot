@@ -163,7 +163,7 @@ function renderPreview(bubble, text) {
   if (lastIndex < text.length) renderTextBlock(bubble, text.slice(lastIndex));
 }
 
-// 위키봇 로봇 캐릭터(expharness의 ML 엔지니어 캐릭터 형태를 벤치마킹).
+// 위키봇 로봇 캐릭터.
 // state: working(답변 만드는 중) / ready(답변 완료) / attention(오류) / idle
 function robotHtml(state, small) {
   const mouth = state === 'attention' ? 'M16 26c2.3-1.5 5.7-1.5 8 0' : 'M16 25c2.3 1.5 5.7 1.5 8 0';

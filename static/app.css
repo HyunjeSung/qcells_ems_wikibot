@@ -1,4 +1,4 @@
-  /* 디자인 토큰 — expharness(ml.bridge.infoedu.co.kr) 작업대 화면을 벤치마킹(2026-10-07). */
+  /* 디자인 토큰(2026-10-07 작업대 화면 개편). */
   :root {
     --page: oklch(97% .005 250);
     --panel: oklch(100% 0 0);
@@ -46,7 +46,7 @@
   }
 
   * { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: transparent transparent; }
-  /* 스크롤바: 평소엔 투명, 스크롤 영역에 마우스를 올렸을 때만 옅게 보인다(expharness처럼 얇게). */
+  /* 스크롤바: 평소엔 투명, 스크롤 영역에 마우스를 올렸을 때만 옅게 보인다(얇게). */
   *:hover { scrollbar-color: var(--line-strong) transparent; }
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -488,7 +488,7 @@
     .projects-table .hide-sm { display: none; }
   }
 
-  /* ── 관리자: 전체 기록(/projects 벤치마킹) · 기록 상세(/history 벤치마킹) ── */
+  /* ── 관리자: 전체 기록 · 기록 상세 ── */
   .projects-page { width: min(1040px, 100%); margin: 0 auto; padding: 44px 0 72px; }
   .projects-page-heading { display: flex; justify-content: space-between; align-items: flex-end; gap: 24px; margin-bottom: 26px; }
   .projects-page-heading h1 { margin: 10px 0 6px; font-size: clamp(30px, 4.4vw, 46px); font-weight: 600; line-height: 1.08; letter-spacing: -.055em; }
@@ -573,7 +573,7 @@
     .history-activity { position: static; max-height: none; }
   }
 
-  /* ── 로봇 위키봇(expharness "ML 엔지니어" 캐릭터 벤치마킹) ── */
+  /* ── 로봇 위키봇 아바타 ── */
   .engineer-character {
     position: relative; z-index: 0; flex: none; width: 40px; height: 40px; display: grid; place-items: center;
     border: 1px solid var(--line-strong); border-radius: var(--radius-lg);
