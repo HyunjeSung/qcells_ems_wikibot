@@ -3,7 +3,7 @@
 사내 Confluence·Jira를 실시간으로 검색해 답하는 웹 챗봇. 가운데 대화, 오른쪽 "작업대"에 답변이
 만들어지는 단계를 실시간으로 보여주고, 모든 질문을 실행 기록으로 남긴다.
 
-현재 버전: **v2.0.0** — 변경 내역은 [GitHub Releases](https://github.com/HyunjeSung/qcells_ems_wikibot/releases) 참고.
+현재 버전: **v2.0.1** — 변경 내역은 [GitHub Releases](https://github.com/HyunjeSung/qcells_ems_wikibot/releases) 참고.
 
 ## 주요 기능
 

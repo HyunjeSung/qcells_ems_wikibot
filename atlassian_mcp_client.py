@@ -486,11 +486,23 @@ def rovo_search(query, limit=5, fetch_full_pages=True, two_hop=True, timeout=20)
     # 써서 스페이스를 URL만으로 못 가릴 때가 있는데(실측: EnergySW 소속인 "2024 CW42 주간
     # 업무"도 이 형식으로 나옴), 이런 경우는 정말로 EnergySW여도 그냥 제외한다 — 가끔 유효한
     # 문서를 놓치는 것보다, 다른 제품 스페이스 문서가 답변에 섞여 들어가는 쪽이 훨씬 위험하다.
+    #
+    # 허용 목록 밖 스페이스 페이지는 버리지 않고 "후순위"로 강등한다(2026-10-08, 사용자 확정:
+    # "confluence에서 dnp3.0 찾아봐"가 XoriantCon/SD 스페이스에만 있는 DNP3 문서를 전부 걸러내
+    # "찾지 못했습니다"로 끝난 사고 — 같은 질의를 Claude Code는 필터 없이 찾아냈다). 허용 스페이스
+    # 결과로 limit이 채워지면 밖의 문서는 쓰이지 않으므로 기존의 "다른 제품 스페이스 문서가
+    # 섞이는 위험"은 그대로 막히고, 허용 스페이스 페이지가 limit보다 모자랄 때만 밖의 문서가
+    # 그 빈자리를 채운다(아래 outside 블록). 채워진 문서는 "outside_space"로 표시되어 답변에서
+    # 출처 스페이스가 따로 드러난다.
     all_results = inner.get("results", [])
     filtered = [
         r for r in all_results
         if r.get("type") == "issue"
         or (r.get("type") == "page" and _confluence_space_of(r.get("url")) in CONFLUENCE_SPACES)
+    ]
+    outside = [
+        r for r in all_results
+        if r.get("type") == "page" and _confluence_space_of(r.get("url")) not in CONFLUENCE_SPACES
     ]
     # GSP1(Global SW PM)은 클라우드/웹 콘솔이나 조직 관리 같은 다른 레이어를 다룰 때가 있다
     # (실측: TOU 질문에서 GSP1의 "PRD - Time of Use"가 Rovo 관련도 상위로 나와 EnergySW의 실제
@@ -506,6 +518,19 @@ def rovo_search(query, limit=5, fetch_full_pages=True, two_hop=True, timeout=20)
         r.get("type") == "page" and _confluence_space_of(r.get("url")) == "GSP1"
     ) else 0)
     results = filtered[:limit]
+    # 보충 조건: 허용 스페이스 페이지가 모자랄 때, 또는 Rovo가 선택된 허용 스페이스 문서보다
+    # 더 위로 랭크한 밖의 문서일 때. 처음엔 앞의 조건만 썼는데, 허용 스페이스의 주간업무
+    # 같은 노이즈 페이지가 limit을 채워 밖의 정답 문서(DNP3 질의의 XoriantCon)가 하나도 못
+    # 들어왔다(실측). 그래서 Rovo 원래 순위가 선택된 허용 문서의 꼴찌보다 앞서는 경우도 인정한다.
+    inside_pages = [r for r in results if r.get("type") == "page"]
+    if outside:
+        rank = {id(r): i for i, r in enumerate(all_results)}
+        worst_kept = max((rank[id(r)] for r in inside_pages), default=-1)
+        short = len(inside_pages) < limit
+        picked = [r for r in outside if short or rank[id(r)] < worst_kept][:limit * 2]
+        for r in picked:
+            r["outside_space"] = _confluence_space_of(r.get("url"))
+        results = results + picked
 
     # getConfluencePage를 ThreadPoolExecutor로 병렬화했다가(순차 ~3.6초 -> 병렬 ~1.5초로
     # 단축은 됐음) 같은 세션에서 동시에 여러 요청을 보내면 요청/응답이 서로 뒤섞이는 사고가
@@ -532,6 +557,7 @@ def rovo_search(query, limit=5, fetch_full_pages=True, two_hop=True, timeout=20)
             "text": text,
             "type": r.get("type", "page"),
             "author_id": author_id,
+            "outside_space": r.get("outside_space"),
         })
 
     # 2-hop: 1차 결과가 놓친 문서를 최대 MAX_LINKED_FOLLOW개까지 보완한다(사용자 확정,
